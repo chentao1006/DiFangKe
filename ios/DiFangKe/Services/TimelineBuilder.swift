@@ -7,7 +7,7 @@ import Photos
 enum FootprintIconDefaults {
     static let map = "mappin"
     static let card = "questionmark.circle.dashed"
-    static let mapSnapshotVersion = "footprint-map-pin-v12"
+    static let mapSnapshotVersion = "footprint-map-pin-v14"
 }
 
 // Add TimelineItem enum
@@ -357,7 +357,7 @@ class TimelineBuilder {
                 }
             }
             
-            if let fp = prevFp, t.manualType == nil,
+            if let fp = prevFp,
                t.points.first.map({ endpoint in
                    shouldAttachTransportEndpoint(
                        pathEndpoint: CodableCoordinate(lat: endpoint.latitude, lon: endpoint.longitude),
@@ -398,7 +398,7 @@ class TimelineBuilder {
                 }
             }
             
-            if let fp = nextFp, t.manualType == nil,
+            if let fp = nextFp,
                updatedT.points.last.map({ endpoint in
                    shouldAttachTransportEndpoint(
                        pathEndpoint: CodableCoordinate(lat: endpoint.latitude, lon: endpoint.longitude),

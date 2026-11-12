@@ -109,7 +109,7 @@ struct DataManagerView: View {
                 }
                 
                 NavigationLink(destination: RawLogsManagerView()) {
-                    Label("查看/导出原始轨迹", systemImage: "doc.text.magnifyingglass")
+                    Label("管理原始轨迹数据", systemImage: "doc.text.magnifyingglass")
                 }
             }
 

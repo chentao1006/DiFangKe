@@ -5,6 +5,7 @@ import BackgroundTasks
 class NotificationManager {
     static let shared = NotificationManager()
     private let newFootprintActivityCategoryID = "dfk.newFootprintActivity"
+    private let liveActivityRecoveryNotificationID = "currentLiveActivityRecovery"
     private let preparedDailySummaryDateKey = "preparedDailySummaryDate"
     private let preparedDailySummaryBodyKey = "preparedDailySummaryBody"
     private let preparedDailySummaryOverviewKey = "preparedDailySummaryOverview"
@@ -402,7 +403,7 @@ class NotificationManager {
         content.userInfo = ["type": "resume_current_live_activity"]
 
         let request = UNNotificationRequest(
-            identifier: "currentLiveActivityRecovery",
+            identifier: liveActivityRecoveryNotificationID,
             content: content,
             trigger: nil
         )
@@ -411,6 +412,14 @@ class NotificationManager {
                 print("Failed to send Live Activity recovery notification: \(error)")
             }
         }
+    }
+
+    /// Once the app is open, its Live Activity can recover directly. Remove only
+    /// this recovery prompt and leave daily summaries and footprint alerts intact.
+    func removeLiveActivityRecoveryNotification() {
+        UNUserNotificationCenter.current().removeDeliveredNotifications(
+            withIdentifiers: [liveActivityRecoveryNotificationID]
+        )
     }
 
     /// The trip-plan feature has been removed. Older builds scheduled its

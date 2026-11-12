@@ -239,8 +239,8 @@ class AppConfig {
         double(forKey: "DRIFT_DISTANCE_GAP")
     }
 
-    var cloudSyncLookbackDays: Int {
-        int(forKey: "CLOUD_SYNC_LOOKBACK_DAYS")
+    var cloudRawTrajectoryAutoBackupLookbackDays: Int {
+        max(1, int(forKey: "CLOUD_RAW_TRAJECTORY_AUTO_BACKUP_LOOKBACK_DAYS"))
     }
     
     var tagInheritanceDistance: Double {
@@ -670,8 +670,20 @@ class AppConfig {
         int(forKey: "REVIEW_PHOTO_IMPORT_SUGGESTION_MAX_FOOTPRINTS")
     }
 
-    var reviewCacheRefreshDays: Int {
-        int(forKey: "REVIEW_CACHE_REFRESH_DAYS")
+    var reviewLast7DaysCacheRefreshDays: Int {
+        int(forKey: "REVIEW_LAST_7_DAYS_CACHE_REFRESH_DAYS")
+    }
+
+    var reviewLast30DaysCacheRefreshDays: Int {
+        int(forKey: "REVIEW_LAST_30_DAYS_CACHE_REFRESH_DAYS")
+    }
+
+    var reviewLast90DaysCacheRefreshDays: Int {
+        int(forKey: "REVIEW_LAST_90_DAYS_CACHE_REFRESH_DAYS")
+    }
+
+    var reviewLastYearCacheRefreshDays: Int {
+        int(forKey: "REVIEW_LAST_YEAR_CACHE_REFRESH_DAYS")
     }
 
     var reviewRangeCacheMemoryCount: Int {

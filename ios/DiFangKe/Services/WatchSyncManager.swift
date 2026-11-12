@@ -238,6 +238,7 @@ final class WatchSyncManager: NSObject, @preconcurrency WCSessionDelegate {
         let liveStayStart: Date?
         let livePlaceName: String?
         let matchedPlaceID: UUID?
+        let hasUserDefinedPlaces: Bool
         let allTodayPoints: [CLLocation]
     }
 
@@ -255,13 +256,16 @@ final class WatchSyncManager: NSObject, @preconcurrency WCSessionDelegate {
     private func makeLiveState() -> WatchLiveState {
         let locationManager = LocationManager.shared
         let liveStayStart = locationManager.isCurrentlyMoving ? nil : locationManager.currentStatusStartedAt
+        let hasUserDefinedPlaces = locationManager.allPlaces.contains { $0.isUserDefined && !$0.isIgnored }
         let livePlaceName: String? = {
             guard liveStayStart != nil else { return nil }
-            if let place = locationManager.matchedPlace, !place.isIgnored { return place.name }
-            if let title = locationManager.ongoingTitle,
-               !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return title }
-            let address = locationManager.currentAddress.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !address.isEmpty && address != "正在解析位置..." && address != "未知位置" { return address }
+            if let place = locationManager.matchedPlace,
+               place.isUserDefined,
+               !place.isIgnored,
+               let name = Self.displayableOngoingPlaceName(place.name) { return name }
+            if hasUserDefinedPlaces,
+               let title = Self.displayableOngoingPlaceName(locationManager.ongoingTitle) { return title }
+            if let address = Self.displayableOngoingPlaceName(locationManager.currentAddress) { return address }
             return "正在停留"
         }()
         return WatchLiveState(
@@ -273,8 +277,15 @@ final class WatchSyncManager: NSObject, @preconcurrency WCSessionDelegate {
             liveStayStart: liveStayStart,
             livePlaceName: livePlaceName,
             matchedPlaceID: locationManager.matchedPlace?.placeID,
+            hasUserDefinedPlaces: hasUserDefinedPlaces,
             allTodayPoints: locationManager.allTodayPoints
         )
+    }
+
+    nonisolated private static func displayableOngoingPlaceName(_ value: String?) -> String? {
+        let value = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let unresolvedValues: Set<String> = ["", "未知位置", "未知地点", "地点记录", "正在解析位置...", "此处"]
+        return (unresolvedValues.contains(value) || value.hasPrefix("正在解析位置")) ? nil : value
     }
 
     /// Builds (fetch, decode, statistics, JSON encode) on a detached background

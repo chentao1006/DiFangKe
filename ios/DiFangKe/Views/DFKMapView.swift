@@ -683,6 +683,73 @@ private enum DFKMapContentBuilder {
         }
     }
 
+    /// The fixed review card cannot be zoomed to separate adjacent grid
+    /// cells. Merge groups whose rendered markers would overlap on screen.
+    static func mergingOverlappingReviewGroups(
+        _ groups: [DFKMapFootprintGroup],
+        footprints: [DFKMapFootprintInput],
+        region: MKCoordinateRegion?,
+        viewWidth: CGFloat
+    ) -> [DFKMapFootprintGroup] {
+        guard let region, groups.count > 1, viewWidth > 0 else { return groups }
+        let west = MKMapPoint(CLLocationCoordinate2D(
+            latitude: region.center.latitude,
+            longitude: region.center.longitude - region.span.longitudeDelta / 2
+        ))
+        let east = MKMapPoint(CLLocationCoordinate2D(
+            latitude: region.center.latitude,
+            longitude: region.center.longitude + region.span.longitudeDelta / 2
+        ))
+        var mapWidth = east.x - west.x
+        if mapWidth <= 0 { mapWidth += MKMapSize.world.width }
+        guard mapWidth > 0 else { return groups }
+
+        let scale = Double(viewWidth) / mapWidth
+        let points = groups.map { group -> CGPoint in
+            let point = MKMapPoint(group.coordinate)
+            return CGPoint(x: point.x * scale, y: point.y * scale)
+        }
+        let mergeDistance = DFKReviewPlaceMapMarker.collisionDiameter
+            * CGFloat(AppConfig.shared.mapTransportIconMergeDiameterRatio)
+        var parents = Array(groups.indices)
+        func root(_ index: Int) -> Int {
+            var current = index
+            while parents[current] != current { current = parents[current] }
+            return current
+        }
+        for left in groups.indices {
+            for right in groups.indices where right > left {
+                guard hypot(points[left].x - points[right].x, points[left].y - points[right].y) < mergeDistance else { continue }
+                let leftRoot = root(left)
+                let rightRoot = root(right)
+                if leftRoot != rightRoot { parents[rightRoot] = leftRoot }
+            }
+        }
+
+        var components: [Int: [DFKMapFootprintGroup]] = [:]
+        for index in groups.indices {
+            components[root(index), default: []].append(groups[index])
+        }
+        return components.keys.sorted().compactMap { key in
+            guard let members = components[key], let first = members.first else { return nil }
+            guard members.count > 1 else { return first }
+            let totalWeight = members.reduce(0.0) { $0 + max($1.totalDuration, 1) }
+            let latitude = members.reduce(0.0) { $0 + $1.coordinate.latitude * max($1.totalDuration, 1) } / totalWeight
+            let longitude = members.reduce(0.0) { $0 + $1.coordinate.longitude * max($1.totalDuration, 1) } / totalWeight
+            let representativeIndex = members.max { $0.totalDuration < $1.totalDuration }?.representativeIndex ?? first.representativeIndex
+            let memberIndices = sortedByStartTime(members.flatMap(\.memberIndices), in: footprints)
+            return DFKMapFootprintGroup(
+                id: "overview-cluster:\(members.map(\.id).sorted().joined(separator: "|"))",
+                memberIndices: memberIndices,
+                representativeIndex: representativeIndex,
+                coordinate: CLLocationCoordinate2D(latitude: latitude, longitude: longitude),
+                totalDuration: members.reduce(0) { $0 + $1.totalDuration },
+                placeCount: members.reduce(0) { $0 + $1.placeCount },
+                latestPhotoAssetID: latestPhotoAssetID(of: memberIndices, in: footprints)
+            )
+        }
+    }
+
     private static func sortedByStartTime(_ indices: [Int], in footprints: [DFKMapFootprintInput]) -> [Int] {
         indices.sorted { footprints[$0].startTime < footprints[$1].startTime }
     }
@@ -1286,6 +1353,9 @@ struct DFKMapView: View {
     var allowsGeneratedSnapshot: Bool = true
     var showsStandalonePhotos: Bool = false
     var prefersActivityIcons: Bool = false
+    /// Context-specific symbol for footprints without an activity. Records
+    /// keeps the question mark; Review opts into the existing map pin symbol.
+    var footprintFallbackIcon: String = FootprintIconDefaults.card
     var condensesTransportOverview: Bool = false
     var clustersPlacesByMapScale: Bool = false
     var placeClusterRegion: MKCoordinateRegion? = nil
@@ -1361,6 +1431,7 @@ struct DFKMapView: View {
         heatmapPoints: [HeatmapPoint] = [],
         showsStandalonePhotos: Bool = false,
         prefersActivityIcons: Bool = false,
+        footprintFallbackIcon: String = FootprintIconDefaults.card,
         condensesTransportOverview: Bool = false,
         clustersPlacesByMapScale: Bool = false,
         placeClusterRegion: MKCoordinateRegion? = nil,
@@ -1393,6 +1464,7 @@ struct DFKMapView: View {
         self.heatmapPoints = heatmapPoints
         self.showsStandalonePhotos = showsStandalonePhotos
         self.prefersActivityIcons = prefersActivityIcons
+        self.footprintFallbackIcon = footprintFallbackIcon
         self.condensesTransportOverview = condensesTransportOverview
         self.clustersPlacesByMapScale = clustersPlacesByMapScale
         self.placeClusterRegion = placeClusterRegion
@@ -1674,7 +1746,8 @@ struct DFKMapView: View {
     }
 
     private func aggregationKey(contentRevision: Int) -> String {
-        "\(contentRevision)|\(placeClusteringRegionToken)"
+        let overviewWidth = isInteractive ? 0 : Int(transportMapWidth.rounded())
+        return "\(contentRevision)|\(placeClusteringRegionToken)|\(overviewWidth)"
     }
 
     /// Cheap fingerprints of every input the map content depends on, hashed
@@ -1825,6 +1898,8 @@ struct DFKMapView: View {
             content.combine(flag)
             snapshot.combine(flag)
         }
+        content.combine(footprintFallbackIcon)
+        snapshot.combine(footprintFallbackIcon)
         return (content.intValue, snapshot.intValue)
     }
 
@@ -1898,13 +1973,23 @@ struct DFKMapView: View {
         let content = mapContent
         let footprints = contentFootprints
         let region = placeClusteringRegion
+        let mergesScreenOverlaps = !isInteractive
+        let viewWidth = transportMapWidth
         let sourceKey = aggregationKey(contentRevision: contentKey)
         let result = await Task.detached(priority: .userInitiated) { () -> (groups: [DFKMapFootprintGroup], photoIDs: [String], photoKey: Int) in
-            let groups = DFKMapContentBuilder.aggregatedGroups(
+            let regionGroups = DFKMapContentBuilder.aggregatedGroups(
                 places: content.placeGroups,
                 footprints: content.footprints,
                 region: region
             )
+            let groups = mergesScreenOverlaps
+                ? DFKMapContentBuilder.mergingOverlappingReviewGroups(
+                    regionGroups,
+                    footprints: content.footprints,
+                    region: region,
+                    viewWidth: viewWidth
+                )
+                : regionGroups
             let footprintIDs = groups.compactMap(\.latestPhotoAssetID)
             let standaloneIDs = content.photoAnnotations.map { $0.asset.localIdentifier }
             let photoIDs = Array(Set(footprintIDs + standaloneIDs)).sorted()
@@ -2123,7 +2208,7 @@ struct DFKMapView: View {
                 guard !isInteractive else { return }
                 inferredRoutesRevision = TransportRouteCompletion.revision
             }
-            .task(id: "\(mapContent.key ?? 0)|\(mapContent.key == nil)|\(placeClusteringRegionToken)") {
+            .task(id: "\(mapContent.key ?? 0)|\(mapContent.key == nil)|\(placeClusteringRegionToken)|\(isInteractive ? 0 : Int(transportMapWidth.rounded()))") {
                 await refreshAggregatedFootprints()
             }
             .task(id: isInteractive ? nil : "\(snapshotCacheKey(for: geometry.size, snapshotRevision: revisions.snapshot))#generate:\(allowsGeneratedSnapshot)#ready:\(isAggregationCurrent)") {
@@ -2277,8 +2362,9 @@ struct DFKMapView: View {
         let activity = fp.getActivityType(from: allActivities)
         let activityColor = activity?.color ?? Color.gray
         let iconColor: Color = .white
-        let iconName = activity?.icon ?? FootprintIconDefaults.card
-        let iconSize: CGFloat = isMiniTimelineMode ? 9 : (activity?.icon == nil ? 18 : 10) * constantScale
+        let iconName = activity?.icon ?? footprintFallbackIcon
+        let usesLargeMissingActivitySymbol = activity == nil && footprintFallbackIcon == FootprintIconDefaults.card
+        let iconSize: CGFloat = isMiniTimelineMode ? 9 : (usesLargeMissingActivitySymbol ? 18 : 10) * constantScale
         let durationTuple = formatDuration(aggregated.totalDuration)
         let fontSize = isInteractive ? 6.5 * constantScale : 5.5 * constantScale
 
@@ -2519,7 +2605,7 @@ struct DFKMapView: View {
         // depends on the region it is laid out on.
         let contentKey = "content-v2:\(String(snapshotRevision, radix: 36))"
         let placeClusterKey = clustersPlacesByMapScale ? "place-clusters:\(placeClusteringRegionToken)" : "no-place-clusters"
-        return [FootprintIconDefaults.mapSnapshotVersion, sizeKey, styleKey, insetKey, routeStyleKey, showsUserDefinedPlaceRadii ? "place-radii" : "no-place-radii", contentKey, placeClusterKey, showsUserLocation ? "user" : "nouser"].joined(separator: "#")
+        return [FootprintIconDefaults.mapSnapshotVersion, sizeKey, styleKey, insetKey, routeStyleKey, footprintFallbackIcon, showsUserDefinedPlaceRadii ? "place-radii" : "no-place-radii", contentKey, placeClusterKey, showsUserLocation ? "user" : "nouser"].joined(separator: "#")
     }
 
     private func loadSnapshot(for size: CGSize, forceWidgetRefresh: Bool = false) {
@@ -2650,6 +2736,7 @@ struct DFKMapView: View {
             let activity = footprint.getActivityType(from: allActivities)
             let constantScale: CGFloat = 1.32
             let size: CGFloat = 20 * constantScale
+            let usesLargeMissingActivitySymbol = activity == nil && footprintFallbackIcon == FootprintIconDefaults.card
             let marker: AnyView
             if clustersPlacesByMapScale, aggregated.placeCount > 1 {
                 marker = AnyView(DFKReviewPlaceMapMarker(
@@ -2662,8 +2749,8 @@ struct DFKMapView: View {
                     constantScale: constantScale,
                     activityColor: activity?.color ?? .gray,
                     iconColor: .white,
-                    iconName: activity?.icon ?? FootprintIconDefaults.card,
-                    iconSize: (activity?.icon == nil ? 18 : 10) * constantScale,
+                    iconName: activity?.icon ?? footprintFallbackIcon,
+                    iconSize: (usesLargeMissingActivitySymbol ? 18 : 10) * constantScale,
                     // A single review place is drawn as its footprint's activity icon.
                     photoImage: prefersActivityIcons || clustersPlacesByMapScale
                         ? nil
@@ -3801,13 +3888,17 @@ private struct DFKFootprintMapMarker: View {
 }
 
 private struct DFKReviewPlaceMapMarker: View {
+    static let baseSize: CGFloat = 36
+    static let markerScale: CGFloat = 1.32
+    static let collisionDiameter = baseSize * markerScale
+
     let placeCount: Int
     let photoImage: UIImage?
 
     var body: some View {
         DFKFootprintMapMarker(
-            size: 36,
-            constantScale: 1.32,
+            size: Self.baseSize,
+            constantScale: Self.markerScale,
             activityColor: Color.dfkAccent,
             iconColor: .white,
             iconName: "mappin",

@@ -376,6 +376,17 @@ struct FootprintModalView: View {
                 if !isDraft {
                     try? modelContext.save()
                 }
+                if hasChanged {
+                    NotificationCenter.default.post(
+                        name: NSNotification.Name("FootprintDataChanged"),
+                        object: nil,
+                        userInfo: [
+                            "date": Calendar.current.startOfDay(for: footprint.startTime),
+                            "footprintID": footprint.footprintID,
+                            "isUserEdit": true
+                        ]
+                    )
+                }
             }
         }
         .toolbar(removing: .sidebarToggle)
@@ -2951,6 +2962,15 @@ struct AddToFavoriteModal: View {
         footprint.isAddressEditedByHand = true
         footprint.markManualMetadataEdit()
         try? modelContext.save()
+        NotificationCenter.default.post(
+            name: NSNotification.Name("FootprintDataChanged"),
+            object: nil,
+            userInfo: [
+                "date": Calendar.current.startOfDay(for: footprint.startTime),
+                "footprintID": footprint.footprintID,
+                "isUserEdit": true
+            ]
+        )
         UIImpactFeedbackGenerator(style: .medium).impactOccurred()
         dismiss()
     }

@@ -262,8 +262,9 @@
     <real>300</real>
 
     <!-- 同步与业务逻辑参数 -->
-    <key>CLOUD_SYNC_LOOKBACK_DAYS</key>
-    <integer>7</integer>
+    <!-- 自动备份每次覆盖的最近日期范围，避免反复上传全部历史文件 -->
+    <key>CLOUD_RAW_TRAJECTORY_AUTO_BACKUP_LOOKBACK_DAYS</key>
+    <integer>2</integer>
 	<key>TRIP_SCAN_BATCH_DAYS</key>
 	<integer>14</integer>
 	<key>TRIP_SCAN_INTERVAL_HOURS</key>
@@ -554,9 +555,15 @@
     <key>REVIEW_MEMORY_DIVERSE_TRANSPORT_MIN_COUNT</key>
     <integer>2</integer>
 
-    <!-- 回顾近期范围和今年的数据每天更新，统计不含今天；历史年份仅在内容或配置变化时更新 -->
-    <key>REVIEW_CACHE_REFRESH_DAYS</key>
+    <!-- 回顾近期范围按各自周期更新，统计不含今天；历史年份仅在内容或配置变化时更新 -->
+    <key>REVIEW_LAST_7_DAYS_CACHE_REFRESH_DAYS</key>
     <integer>1</integer>
+    <key>REVIEW_LAST_30_DAYS_CACHE_REFRESH_DAYS</key>
+    <integer>3</integer>
+    <key>REVIEW_LAST_90_DAYS_CACHE_REFRESH_DAYS</key>
+    <integer>5</integer>
+    <key>REVIEW_LAST_YEAR_CACHE_REFRESH_DAYS</key>
+    <integer>7</integer>
     <!-- 同时保留的已解码回顾范围数量和内存缓存预算（MB），内存警告时清空 -->
     <key>REVIEW_RANGE_CACHE_MEMORY_COUNT</key>
     <integer>3</integer>

@@ -45,6 +45,20 @@ enum StatisticsRange: Hashable, Codable {
         case .customYear(let year): return "\(year)年"
         }
     }
+
+    var cacheRefreshDays: Int {
+        let config = AppConfig.shared
+        switch self {
+        case .last7Days:
+            return config.reviewLast7DaysCacheRefreshDays
+        case .last30Days:
+            return config.reviewLast30DaysCacheRefreshDays
+        case .last90Days:
+            return config.reviewLast90DaysCacheRefreshDays
+        case .lastYear, .customYear:
+            return config.reviewLastYearCacheRefreshDays
+        }
+    }
 }
 
 private enum FrequentPlaceRankScope: String, CaseIterable, Identifiable, Codable {
@@ -101,6 +115,16 @@ private struct ReviewMemoryCandidate: Identifiable, Codable {
     let systemImage: String
     let photoAssetIDs: [String]
     let score: Double
+}
+
+private struct ResolvedPastMemoryPhotos: Equatable {
+    let candidateID: String
+    let assetIDs: [String]
+}
+
+private struct PastMemoryPhotoResolutionID: Hashable {
+    let candidateID: String
+    let sourceFingerprint: Int
 }
 
 private struct ReviewMemoryPhotoCarousel: View {
@@ -257,15 +281,8 @@ private struct ReviewRangeControl {
     let years: [Int]
 }
 
-private enum ReviewRangeTrace {
-    static func log(_ message: String) {
-        NSLog("%@", "[ReviewRange] \(message)")
-    }
-}
-
 /// Observes the existing native control without recognizing or consuming taps.
 private struct ReviewRangeTouchTrace: UIViewRepresentable {
-    let range: StatisticsRange
     let selection: Binding<Int>
 
     func makeUIView(context: Context) -> ProbeView {
@@ -276,7 +293,6 @@ private struct ReviewRangeTouchTrace: UIViewRepresentable {
     }
 
     func updateUIView(_ view: ProbeView, context: Context) {
-        view.rangeText = range.rawValue
         view.selection = selection
         view.attach()
     }
@@ -286,7 +302,6 @@ private struct ReviewRangeTouchTrace: UIViewRepresentable {
     }
 
     final class ProbeView: UIView, UIGestureRecognizerDelegate {
-        var rangeText = ""
         var selection: Binding<Int> = .constant(1)
         private weak var control: UISegmentedControl?
         private var pendingTouch: (target: Int, startingIndex: Int)?
@@ -323,7 +338,6 @@ private struct ReviewRangeTouchTrace: UIViewRepresentable {
                     control = found
                     found.addGestureRecognizer(touchProbe)
                     found.addTarget(self, action: #selector(nativeValueChanged(_:)), for: .valueChanged)
-                    ReviewRangeTrace.log("probe.attach current=\(rangeText) native=\(found.selectedSegmentIndex) bounds=\(found.bounds)")
                     return
                 }
                 ancestor = view.superview
@@ -339,7 +353,8 @@ private struct ReviewRangeTouchTrace: UIViewRepresentable {
 
         private func findControl(in view: UIView) -> UISegmentedControl? {
             if let segmented = view as? UISegmentedControl,
-               segmented.numberOfSegments == 5, segmented.titleForSegment(at: 0) == "7天" {
+               segmented.numberOfSegments == 5,
+               segmented.titleForSegment(at: 0) == "7天" {
                 return segmented
             }
             for child in view.subviews {
@@ -355,12 +370,10 @@ private struct ReviewRangeTouchTrace: UIViewRepresentable {
                 let count = control.numberOfSegments
                 if width > 0, count > 0, point.x >= 0, point.x < width,
                    point.y >= 0, point.y < control.bounds.height {
-                    let target = Int(point.x / width * CGFloat(count))
-                    pendingTouch = (target, control.selectedSegmentIndex)
+                    pendingTouch = (Int(point.x / width * CGFloat(count)), control.selectedSegmentIndex)
                 } else {
                     pendingTouch = nil
                 }
-                ReviewRangeTrace.log("touch.begin point=\(point) bounds=\(control.bounds) native=\(control.selectedSegmentIndex) target=\(pendingTouch?.target ?? -1) current=\(rangeText)")
             }
             // Reject the touch so the probe cannot recognize, cancel or delay it.
             return false
@@ -368,16 +381,12 @@ private struct ReviewRangeTouchTrace: UIViewRepresentable {
 
         @objc private func nativeValueChanged(_ control: UISegmentedControl) {
             let nativeIndex = control.selectedSegmentIndex
-            ReviewRangeTrace.log("native.valueChanged index=\(nativeIndex) target=\(pendingTouch?.target ?? -1) current=\(rangeText)")
             defer { pendingTouch = nil }
-            // On the first tap UIKit can report the previously selected segment
-            // even when the touch lands in another one. Correct only that case;
-            // preserve native changes and the year menu's own selection path.
+            // On the first tap UIKit can report the previously selected segment.
             guard let touch = pendingTouch,
                   (0...3).contains(touch.target),
                   nativeIndex == touch.startingIndex,
                   nativeIndex != touch.target else { return }
-            ReviewRangeTrace.log("native.correct index=\(nativeIndex) target=\(touch.target)")
             control.selectedSegmentIndex = touch.target
             selection.wrappedValue = touch.target
         }
@@ -388,6 +397,10 @@ private struct ReviewRangeTouchTrace: UIViewRepresentable {
 private struct ReviewRangePicker: View {
     @Binding var selection: StatisticsRange
     let years: [Int]
+    /// The page-level picker needs the UIKit first-tap repair. Sheet pickers
+    /// must remain purely binding-driven so one sheet cannot attach a probe
+    /// to another range control in the presentation hierarchy.
+    var repairsFirstTap = false
 
     private var isCustomYear: Bool {
         if case .customYear = selection { return true }
@@ -415,10 +428,10 @@ private struct ReviewRangePicker: View {
                 case 3: range = .lastYear
                 case 4:
                     guard !isCustomYear else { return }
-                    range = .customYear(Calendar.current.component(.year, from: Date()))
+                    guard let firstYear = years.first else { return }
+                    range = .customYear(firstYear)
                 default: return
                 }
-                ReviewRangeTrace.log("binding.set segment=\(index) current=\(selection.rawValue) target=\(range.rawValue)")
                 selection = range
             }
         )
@@ -434,12 +447,10 @@ private struct ReviewRangePicker: View {
                 .tag(4)
         }
         .pickerStyle(.segmented)
-        .background(ReviewRangeTouchTrace(range: selection, selection: selectedSegment))
-        .onAppear {
-            ReviewRangeTrace.log("picker.appear current=\(selection.rawValue)")
-        }
-        .onDisappear {
-            ReviewRangeTrace.log("picker.disappear current=\(selection.rawValue)")
+        .background {
+            if repairsFirstTap {
+                ReviewRangeTouchTrace(selection: selectedSegment)
+            }
         }
         .overlay {
             GeometryReader { geometry in
@@ -1214,7 +1225,7 @@ private struct ReviewSourceCachePayload: Codable, @unchecked Sendable {
 /// Disk coding runs outside this actor so a write cannot hold up cache hits.
 private actor ReviewRangeResultCache {
     static let shared = ReviewRangeResultCache()
-    static let formatVersion = 2
+    static let formatVersion = 3
 
     private final class Entry: @unchecked Sendable {
         let range: StatisticsRange
@@ -1236,39 +1247,40 @@ private actor ReviewRangeResultCache {
         }
     }
     private let memoryCache = NSCache<NSString, Entry>()
-    private var sourceSnapshot: ReviewSourceCachePayload?
-    private var sourceLoadTask: (id: UUID, task: Task<ReviewSourceCachePayload?, Never>)?
+    private var sourceSnapshots: [Int: ReviewSourceCachePayload] = [:]
+    private var sourceLoadTasks: [Int: (id: UUID, task: Task<ReviewSourceCachePayload?, Never>)] = [:]
     private let writeQueue = DispatchQueue(label: "com.difangke.reviewRangeCache.write", qos: .utility)
     private var writeIDs: [StatisticsRange: UUID] = [:]
 
     func clearMemory() {
         memoryCache.removeAllObjects()
-        sourceSnapshot = nil
+        sourceSnapshots.removeAll()
     }
 
-    /// One source for every range and sheet for the local calendar day.
-    /// Persist it with the existing disposable cache so relaunching does not
-    /// pick up live edits midway through the day's review.
+    /// Keep one source per configured refresh period so shorter ranges cannot
+    /// accidentally advance the longer ranges' refresh schedule.
+    /// Persist these with the existing disposable cache across relaunches.
     func source(in container: ModelContainer, refreshDays: Int) async -> ReviewSourceSnapshot? {
+        let cacheKey = max(1, refreshDays)
         let now = Date()
         let calendar = Calendar.current
         let calendarID = String(describing: calendar.identifier)
         let timeZone = calendar.timeZone.identifier
-        if let cached = sourceSnapshot,
+        if let cached = sourceSnapshots[cacheKey],
            cached.calendar == calendarID, cached.timeZone == timeZone,
-           Self.isFresh(cached.source.capturedAt, now: now, refreshDays: refreshDays) {
+           Self.isFresh(cached.source.capturedAt, now: now, refreshDays: cacheKey) {
             return cached.source
         }
-        if let sourceLoadTask {
-            return await finishSourceLoad(sourceLoadTask, in: container, refreshDays: refreshDays)
+        if let sourceLoadTask = sourceLoadTasks[cacheKey] {
+            return await finishSourceLoad(sourceLoadTask, cacheKey: cacheKey, in: container)
         }
-        let url = cacheURL(filename: "source.plist")
+        let url = cacheURL(filename: "source-\(cacheKey)-days.plist")
         let task = Task.detached(priority: .userInitiated) { () -> ReviewSourceCachePayload? in
             if let url, let data = try? Data(contentsOf: url),
                let cached = try? PropertyListDecoder().decode(ReviewSourceCachePayload.self, from: data),
                cached.version == Self.formatVersion,
                cached.calendar == calendarID, cached.timeZone == timeZone,
-               Self.isFresh(cached.source.capturedAt, now: now, refreshDays: refreshDays) {
+               Self.isFresh(cached.source.capturedAt, now: now, refreshDays: cacheKey) {
                 return cached
             }
             guard let source = await ReviewDataBuilder.fetchSource(in: container, now: now) else { return nil }
@@ -1293,28 +1305,28 @@ private actor ReviewRangeResultCache {
             return payload
         }
         let load = (id: UUID(), task: task)
-        sourceLoadTask = load
-        return await finishSourceLoad(load, in: container, refreshDays: refreshDays)
+        sourceLoadTasks[cacheKey] = load
+        return await finishSourceLoad(load, cacheKey: cacheKey, in: container)
     }
 
     private func finishSourceLoad(
         _ load: (id: UUID, task: Task<ReviewSourceCachePayload?, Never>),
-        in container: ModelContainer,
-        refreshDays: Int
+        cacheKey: Int,
+        in container: ModelContainer
     ) async -> ReviewSourceSnapshot? {
         let payload = await load.task.value
-        if sourceLoadTask?.id == load.id {
-            sourceLoadTask = nil
-            sourceSnapshot = payload
+        if sourceLoadTasks[cacheKey]?.id == load.id {
+            sourceLoadTasks[cacheKey] = nil
+            sourceSnapshots[cacheKey] = payload
         }
         guard let payload else { return nil }
         let calendar = Calendar.current
         guard payload.calendar == String(describing: calendar.identifier),
               payload.timeZone == calendar.timeZone.identifier,
-              Self.isFresh(payload.source.capturedAt, now: Date(), refreshDays: refreshDays) else {
-            // Loading can straddle midnight; never publish yesterday's source
-            // to a request that is already waiting for the new day's review.
-            return await source(in: container, refreshDays: refreshDays)
+              Self.isFresh(payload.source.capturedAt, now: Date(), refreshDays: cacheKey) else {
+            // Loading can cross a configured period boundary; never publish a
+            // source that has already expired while the request was waiting.
+            return await source(in: container, refreshDays: cacheKey)
         }
         return payload.source
     }
@@ -1471,6 +1483,23 @@ private enum ReviewDataBuilder {
             return "\(Int(distance.rounded()))米"
         }
         return String(format: "%.1f公里", distance / 1_000)
+    }
+
+    /// Shows the largest calendar unit only, so a return after several years
+    /// does not read as an unhelpfully large number of days.
+    static func formatReturnInterval(from previousDate: Date, to currentDate: Date, calendar: Calendar) -> String {
+        let components = calendar.dateComponents(
+            [.year, .month, .day],
+            from: calendar.startOfDay(for: previousDate),
+            to: calendar.startOfDay(for: currentDate)
+        )
+        if let years = components.year, years > 0 {
+            return "\(years)年"
+        }
+        if let months = components.month, months > 0 {
+            return "\(months)个月"
+        }
+        return "\(max(0, components.day ?? 0))天"
     }
 
     static func compactNumber<T: BinaryFloatingPoint>(_ value: T) -> String {
@@ -2724,7 +2753,9 @@ private enum ReviewDataBuilder {
                 score += 4
                 if !firstCountry && !firstCity {
                     reason = "很久以后又回来"
-                    evidence = "相隔\(daysSincePrevious)天"
+                    evidence = previousVisit.map {
+                        "相隔\(formatReturnInterval(from: $0, to: footprint.startTime, calendar: calendar))"
+                    } ?? "相隔\(daysSincePrevious)天"
                     icon = "arrow.uturn.backward.circle.fill"
                 }
             }
@@ -2899,6 +2930,9 @@ struct HistoryStatisticsView: View {
     /// Database-wide value snapshot, fetched and fingerprinted off main.
     @State private var reviewSource: ReviewSourceSnapshot?
     @State private var reviewAvailableYears: (capturedAt: Date, values: [Int])?
+    /// Place sheets only offer years in which one of their places was visited.
+    /// Prepared off main from the database-wide value snapshot.
+    @State private var reviewPlaceAvailableYears: [Int]?
     /// Everything the sections show for the applied range, built off main.
     @State private var reviewDerived = ReviewDerivedData()
     /// Main-context models for the applied range (map items and selections).
@@ -2914,6 +2948,8 @@ struct HistoryStatisticsView: View {
     @State private var reviewMemoryCandidatesCache: [ReviewMemoryCandidate] = []
     /// An empty candidate list is conclusive only after this range completes.
     @State private var reviewMemoryCandidatesRange: StatisticsRange?
+    /// Device-local Photos identifiers for “On This Day”. Never persisted.
+    @State private var resolvedPastMemoryPhotos: ResolvedPastMemoryPhotos?
     /// The sheet this view presents; each hosts its own range.
     @State private var presentedSheet: ReviewSheetContent?
     @State private var pendingFavoriteFootprint: Footprint?
@@ -2987,7 +3023,10 @@ struct HistoryStatisticsView: View {
     }
 
     private var availableYears: [Int] {
-        reviewAvailableYears?.values ?? reviewDerived.availableYears
+        if case .places? = sheet {
+            return reviewPlaceAvailableYears ?? []
+        }
+        return reviewAvailableYears?.values ?? reviewDerived.availableYears
     }
     private var usesIPadLayout: Bool {
         UIDevice.current.userInterfaceIdiom == .pad
@@ -3002,9 +3041,11 @@ struct HistoryStatisticsView: View {
             }
         }
         .task(id: appliedRange) {
-            ReviewRangeTrace.log("range.task applied=\(appliedRange.rawValue)")
             guard !reviewRoutesReady || reviewDerived.range != appliedRange else { return }
             beginReviewRangeRefresh(appliedRange)
+        }
+        .task(id: reviewSource?.capturedAt) {
+            await refreshReviewPlaceAvailableYears()
         }
         .onChange(of: scenePhase) { _, phase in
             if phase == .background {
@@ -3028,8 +3069,13 @@ struct HistoryStatisticsView: View {
             scheduleReviewRefresh()
         }
         .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("FootprintDataChanged"))) { notification in
-            guard notification.userInfo?["isImport"] as? Bool == true else { return }
-            scheduleReviewRefresh(refreshesHistoricalYears: true)
+            let isImport = notification.userInfo?["isImport"] as? Bool == true
+            let isUserEdit = notification.userInfo?["isUserEdit"] as? Bool == true
+            guard isImport || isUserEdit else { return }
+            scheduleReviewRefresh(
+                refreshesHistoricalYears: true,
+                refreshesCurrentSource: isUserEdit
+            )
         }
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.didReceiveMemoryWarningNotification)) { _ in
             releaseReviewWorkingSet()
@@ -3052,32 +3098,38 @@ struct HistoryStatisticsView: View {
         ScrollView {
             LazyVStack(spacing: 22, pinnedViews: [.sectionHeaders]) {
                 Section {
-                    if reviewRoutesReady {
-                        if usesIPadLayout {
-                            HStack(alignment: .top, spacing: 16) {
+                    // Keep the review content mounted as one lazy child. In
+                    // particular, recycling the map card when it scrolls out
+                    // discards its rendered snapshot and makes it load again
+                    // as soon as the user scrolls back to the top.
+                    VStack(spacing: 22) {
+                        if reviewRoutesReady {
+                            if usesIPadLayout {
+                                HStack(alignment: .top, spacing: 16) {
+                                    reviewHeroSection
+                                        .frame(maxWidth: .infinity)
+                                    memorableSection
+                                        .frame(maxWidth: .infinity,
+                                               maxHeight: reviewMemoryCandidatesRange != appliedRange ? .infinity : nil,
+                                               alignment: .top)
+                                }
+                                .fixedSize(horizontal: false, vertical: reviewMemoryCandidatesRange != appliedRange)
+                            } else {
                                 reviewHeroSection
-                                    .frame(maxWidth: .infinity)
-                                memorableSection
-                                    .frame(maxWidth: .infinity,
-                                           maxHeight: reviewMemoryCandidatesRange != appliedRange ? .infinity : nil,
-                                           alignment: .top)
                             }
-                            .fixedSize(horizontal: false, vertical: reviewMemoryCandidatesRange != appliedRange)
+
+                            if !usesIPadLayout {
+                                memorableSection
+                            }
+                            reviewBentoSection
                         } else {
-                            reviewHeroSection
+                            ProgressView()
+                                .controlSize(.large)
+                                .frame(maxWidth: .infinity, minHeight: 420)
                         }
 
-                        if !usesIPadLayout {
-                            memorableSection
-                        }
-                        reviewBentoSection
-                    } else {
-                        ProgressView()
-                            .controlSize(.large)
-                            .frame(maxWidth: .infinity, minHeight: 420)
+                        Spacer(minLength: 24)
                     }
-
-                    Spacer(minLength: 132)
                 } header: {
                     rangePicker
                         .padding(.top, 8)
@@ -3272,6 +3324,7 @@ struct HistoryStatisticsView: View {
                 showsUserLocation: false,
                 timelineItems: reviewTimelineItemsCache,
                 prefersActivityIcons: false,
+                footprintFallbackIcon: FootprintIconDefaults.map,
                 condensesTransportOverview: true,
                 clustersPlacesByMapScale: true,
                 placeClusterRegion: reviewMapRegion,
@@ -3381,6 +3434,9 @@ struct HistoryStatisticsView: View {
                     }
                 }
             }
+        }
+        .task(id: pastMemoryPhotoResolutionID) {
+            await resolvePastMemoryPhotos()
         }
     }
 
@@ -3931,6 +3987,34 @@ struct HistoryStatisticsView: View {
 
     /// Re-resolves a place sheet for the sheet's range, off main, once that
     /// range's data is ready.
+    private func refreshReviewPlaceAvailableYears() async {
+        guard case .places(let query, let openingPlaces)? = sheet,
+              let source = reviewSource else { return }
+
+        let placeKeys = Set(openingPlaces.map(\.id) + {
+            switch query.source {
+            case .placeKeys(let keys): return keys
+            case .rankItem(.place, let itemID): return [itemID]
+            case .rankItem: return []
+            }
+        }())
+        let normalizedTitles = Set(openingPlaces.map(\.title).map(normalizedPlaceSearchKey).filter { !$0.isEmpty })
+        let usesMapTitle = query.usesMapTitle
+        let years = await reviewDetached(priority: .userInitiated) {
+            let calendar = Calendar.current
+            return Set(source.footprints.compactMap { footprint -> Int? in
+                if placeKeys.contains(footprint.placeKey) {
+                    return calendar.component(.year, from: footprint.startTime)
+                }
+                let title = usesMapTitle ? footprint.mapTitle : footprint.placeName
+                guard normalizedTitles.contains(normalizedPlaceSearchKey(title)) else { return nil }
+                return calendar.component(.year, from: footprint.startTime)
+            }).sorted(by: >)
+        }
+        guard !Task.isCancelled else { return }
+        reviewPlaceAvailableYears = years
+    }
+
     private func resolveSheetPlaces(_ query: ReviewPlaceQuery) async {
         let range = appliedRange
         // The picker commits before its deferred refresh starts, so ready
@@ -4869,8 +4953,55 @@ struct HistoryStatisticsView: View {
         reviewDerived.topRegions
     }
 
-    private var pastMemoryCandidate: ReviewMemoryCandidate? {
+    private var rawPastMemoryCandidate: ReviewMemoryCandidate? {
         reviewDerived.pastMemoryCandidate
+    }
+
+    private var pastMemoryPhotoResolutionID: PastMemoryPhotoResolutionID? {
+        guard let candidateID = rawPastMemoryCandidate?.id,
+              let sourceFingerprint = reviewSourceFingerprint else { return nil }
+        return PastMemoryPhotoResolutionID(candidateID: candidateID, sourceFingerprint: sourceFingerprint)
+    }
+
+    private var pastMemoryCandidate: ReviewMemoryCandidate? {
+        guard let candidate = rawPastMemoryCandidate else { return nil }
+        let assetIDs = resolvedPastMemoryPhotos?.candidateID == candidate.id
+            ? resolvedPastMemoryPhotos?.assetIDs ?? []
+            : []
+        return ReviewMemoryCandidate(
+            id: candidate.id,
+            date: candidate.date,
+            footprintID: candidate.footprintID,
+            placeKey: candidate.placeKey,
+            title: candidate.title,
+            evidence: candidate.evidence,
+            reason: candidate.reason,
+            systemImage: candidate.systemImage,
+            photoAssetIDs: assetIDs,
+            score: candidate.score
+        )
+    }
+
+    private func resolvePastMemoryPhotos() async {
+        guard let candidate = rawPastMemoryCandidate,
+              let footprintID = candidate.footprintID,
+              let source = reviewSource else {
+            resolvedPastMemoryPhotos = nil
+            return
+        }
+        resolvedPastMemoryPhotos = nil
+        let footprint = await reviewDetached(priority: .userInitiated) {
+            source.footprints.first(where: { $0.footprintID == footprintID })
+        }
+        guard !Task.isCancelled, let footprint else { return }
+        let assetIDs = await PhotoService.shared.displayableAssetIDs(
+            storedAssetIDs: footprint.photoAssetIDs,
+            startTime: footprint.startTime,
+            endTime: footprint.endTime,
+            coordinate: CLLocationCoordinate2D(latitude: footprint.latitude, longitude: footprint.longitude)
+        )
+        guard !Task.isCancelled, rawPastMemoryCandidate?.id == candidate.id else { return }
+        resolvedPastMemoryPhotos = ResolvedPastMemoryPhotos(candidateID: candidate.id, assetIDs: assetIDs)
     }
 
     private var reviewRangeWindow: ReviewRangeWindow {
@@ -5217,7 +5348,8 @@ struct HistoryStatisticsView: View {
     }
 
     private func scheduleReviewRefresh(
-        refreshesHistoricalYears: Bool = false
+        refreshesHistoricalYears: Bool = false,
+        refreshesCurrentSource: Bool = false
     ) {
         scheduledReviewRefreshTask?.cancel()
         scheduledReviewRefreshTask = Task { @MainActor in
@@ -5227,11 +5359,12 @@ struct HistoryStatisticsView: View {
             let rangeAtStart = appliedRange
             let isClosedYear = ReviewRangeWindow(range: rangeAtStart).isClosedYear
             let container = modelContext.container
-            let refreshDays = AppConfig.shared.reviewCacheRefreshDays
+            let refreshDays = rangeAtStart.cacheRefreshDays
             // Validate historical content on entry and after an import. Recent
-            // ranges keep their daily source even when imported years change.
+            // ranges keep their daily source when only imported years change,
+            // but a user edit must replace it so visible memories update.
             let liveSource: ReviewSourceSnapshot?
-            if isClosedYear || refreshesHistoricalYears {
+            if isClosedYear || refreshesHistoricalYears || refreshesCurrentSource {
                 liveSource = await reviewDetached(priority: .userInitiated) {
                     await ReviewDataBuilder.fetchSource(in: container, now: Date())
                 }
@@ -5239,7 +5372,7 @@ struct HistoryStatisticsView: View {
                 liveSource = nil
             }
             let source: ReviewSourceSnapshot?
-            if isClosedYear {
+            if isClosedYear || refreshesCurrentSource {
                 source = liveSource
             } else {
                 source = await reviewDetached(priority: .userInitiated) {
@@ -5280,7 +5413,7 @@ struct HistoryStatisticsView: View {
 
         let window = ReviewRangeWindow(range: rangeAtStart, now: source.capturedAt)
         let config = ReviewConfigSnapshot.current()
-        let cacheRefreshDays = AppConfig.shared.reviewCacheRefreshDays
+        let cacheRefreshDays = rangeAtStart.cacheRefreshDays
         let cacheMemoryCount = AppConfig.shared.reviewRangeCacheMemoryCount
         let cacheMemoryLimitBytes = AppConfig.shared.reviewRangeCacheMemoryLimitBytes
         let container = modelContext.container
@@ -5414,9 +5547,10 @@ struct HistoryStatisticsView: View {
     }
 
     private var rangePicker: some View {
-        ReviewRangePicker(selection: $appliedRange, years: availableYears)
+        ReviewRangePicker(selection: $appliedRange, years: availableYears, repairsFirstTap: true)
             .frame(maxWidth: .infinity)
             .padding(8)
+            .dfkDetailMaterial(in: RoundedRectangle(cornerRadius: 22, style: .continuous))
             .padding(.horizontal, 20)
     }
 
@@ -6293,6 +6427,7 @@ struct FullReviewMapView: View {
                 showsUserLocation: true,
                 timelineItems: timelineItems,
                 prefersActivityIcons: false,
+                footprintFallbackIcon: FootprintIconDefaults.map,
                 condensesTransportOverview: true,
                 clustersPlacesByMapScale: true,
                 placeClusterRegion: initialRegion,

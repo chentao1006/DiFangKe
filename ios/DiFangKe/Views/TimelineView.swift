@@ -3868,6 +3868,9 @@ private struct TimelineView: View {
                             selectedFootprintStartsExpanded = true
                             selectedFootprint = storedFootprint(matching: footprint)
                         },
+                        onSetTransportType: { transport, type in
+                            updateTransport(transport, type: type)
+                        },
                         onMerge: {
                             switch item {
                             case .footprint(let footprint):
@@ -5762,6 +5765,7 @@ private struct ContinuousTimelineRow: View {
     let onTap: () -> Void
     let onPhotoTap: (String) -> Void
     let onShowAllPhotos: () -> Void
+    let onSetTransportType: (Transport, TransportType) -> Void
     let onMerge: () -> Void
     let onSplit: () -> Void
     let onToggleFavorite: () -> Void
@@ -5804,12 +5808,7 @@ private struct ContinuousTimelineRow: View {
                     Menu {
                         ForEach(TransportType.allCases, id: \.self) { type in
                             Button {
-                                let tid = transport.id
-                                let descriptor = FetchDescriptor<TransportRecord>(predicate: #Predicate { $0.recordID == tid })
-                                if let record = try? modelContext.fetch(descriptor).first {
-                                    record.manualTypeRaw = type.rawValue
-                                    try? modelContext.save()
-                                }
+                                onSetTransportType(transport, type)
                             } label: {
                                 Label(type.localizedName, systemImage: type.icon)
                             }

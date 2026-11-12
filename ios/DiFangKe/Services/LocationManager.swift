@@ -24,16 +24,6 @@ struct LocationSuggestion: Identifiable, Equatable {
     }
 }
 
-struct RawRecordingDeviceOption: Identifiable, Hashable {
-    let id: String
-    let name: String
-    let isCurrentDevice: Bool
-
-    var subtitle: String {
-        isCurrentDevice ? "当前设备" : String(id.prefix(8))
-    }
-}
-
 // MARK: - 原始轨迹点包装（附带漂移标记）
 struct RawPointEntry {
     let location: CLLocation
@@ -44,16 +34,14 @@ struct RawPointEntry {
 // MARK: - 原始坐标持久化存储（按天存储至 CSV 文件）
 final class RawLocationStore {
     static let shared = RawLocationStore()
+    static let autoBackupEnabledKey = "isRawTrajectoryICloudAutoBackupEnabled"
     
     private let fileManager = FileManager.default
     private let directoryName = "RawLocations"
     private let saveQueue = DispatchQueue(label: "com.ct106.difangke.rawsave", qos: .background)
-    private let preferredRecordingDeviceKey = "raw_recording_source_device_id"
-    private let knownDeviceNamesKey = "raw_recording_device_names"
     
     private init() {
         createDirectoryIfNeeded()
-        rememberKnownDeviceName(currentDeviceName, for: deviceID)
     }
     
     private var documentsDirectory: URL {
@@ -88,57 +76,8 @@ final class RawLocationStore {
         UIDevice.current.name
     }
 
-    private var isRawTrajectoryICloudSyncEnabled: Bool {
-        if UserDefaults.standard.object(forKey: "isRawTrajectoryICloudSyncEnabled") == nil {
-            return true
-        }
-        return UserDefaults.standard.bool(forKey: "isRawTrajectoryICloudSyncEnabled")
-    }
-
     func preferredRecordingDeviceID() -> String {
-        guard isRawTrajectoryICloudSyncEnabled else { return deviceID }
-        if let selected = UserDefaults.standard.string(forKey: preferredRecordingDeviceKey), !selected.isEmpty {
-            return selected
-        }
         return deviceID
-    }
-
-    func setPreferredRecordingDeviceID(_ deviceID: String) {
-        UserDefaults.standard.set(deviceID, forKey: preferredRecordingDeviceKey)
-    }
-
-    func displayName(forRecordingDeviceID deviceID: String) -> String {
-        if deviceID == self.deviceID {
-            return currentDeviceName
-        }
-        return knownDeviceNames()[deviceID] ?? "设备 \(String(deviceID.prefix(8)))"
-    }
-
-    func availableRecordingDevices() -> [RawRecordingDeviceOption] {
-        rememberKnownDeviceName(currentDeviceName, for: deviceID)
-
-        var deviceIDs: Set<String> = [deviceID, preferredRecordingDeviceID()]
-        if let files = try? fileManager.contentsOfDirectory(at: baseDirectory, includingPropertiesForKeys: nil) {
-            for fileURL in files where fileURL.pathExtension == "csv" {
-                if let parsedDeviceID = parseDeviceID(fromFileName: fileURL.lastPathComponent) {
-                    deviceIDs.insert(parsedDeviceID)
-                }
-            }
-        }
-
-        return deviceIDs.map { id in
-            RawRecordingDeviceOption(
-                id: id,
-                name: displayName(forRecordingDeviceID: id),
-                isCurrentDevice: id == deviceID
-            )
-        }
-        .sorted {
-            if $0.isCurrentDevice != $1.isCurrentDevice {
-                return $0.isCurrentDevice && !$1.isCurrentDevice
-            }
-            return $0.name.localizedStandardCompare($1.name) == .orderedAscending
-        }
     }
 
     func availableDatesForPreferredRecordingDevice() -> Set<Date> {
@@ -528,56 +467,241 @@ final class RawLocationStore {
         return String(stem[stem.index(after: dashIndex)...])
     }
 
-    private func knownDeviceNames() -> [String: String] {
-        UserDefaults.standard.dictionary(forKey: knownDeviceNamesKey) as? [String: String] ?? [:]
-    }
-
-    private func rememberKnownDeviceName(_ name: String, for deviceID: String) {
-        guard !name.isEmpty, !deviceID.isEmpty else { return }
-        var knownNames = knownDeviceNames()
-        if knownNames[deviceID] == name { return }
-        knownNames[deviceID] = name
-        UserDefaults.standard.set(knownNames, forKey: knownDeviceNamesKey)
-    }
-
-    // --- CloudKit 手动同步相关 ---
+    // --- CloudKit 手动备份相关 ---
 
     private let cloudDatabase = CKContainer(identifier: "iCloud.com.ct106.difangke").privateCloudDatabase
 
-    func syncToiCloud(onlyRecent: Bool = true, skipUpload: Bool = false) async throws -> Int {
-        let localFiles = try fileManager.contentsOfDirectory(at: baseDirectory, includingPropertiesForKeys: nil)
+    struct CloudStorageSummary: Sendable {
+        let recordCount: Int
+        let earliestDateString: String?
+        let latestDateString: String?
+    }
+
+    struct CloudRestoreReport: Sendable {
+        let restoredCount: Int
+        let skippedExistingCount: Int
+    }
+
+    private struct CloudTrajectoryRecord: Sendable {
+        let recordID: CKRecord.ID
+        let dateString: String
+        let deviceID: String
+    }
+
+    func cloudStorageSummary() async throws -> CloudStorageSummary {
+        let records = try await fetchCloudTrajectoryRecords(predicate: NSPredicate(format: "date != %@", ""))
+        let dates = records.map(\.dateString).filter { !$0.isEmpty }
+        return CloudStorageSummary(
+            recordCount: records.count,
+            earliestDateString: dates.min(),
+            latestDateString: dates.max()
+        )
+    }
+
+    func deleteCloudTrajectories(from startDate: Date, through endDate: Date) async throws -> Int {
+        let records = try await fetchCloudTrajectoryRecords(
+            predicate: NSPredicate(format: "date != %@", "")
+        )
+        let dateRange = Self.dateStringRange(from: startDate, through: endDate)
+        // CloudKit String fields cannot use range predicates. Fetch metadata
+        // only, then filter the ISO date strings away from the main actor.
+        let recordsToDelete = await Task.detached(priority: .utility) {
+            records.filter { dateRange.contains($0.dateString) }
+        }.value
+
+        let recordIDs = recordsToDelete.map(\.recordID)
+        let batchSize = 200
+        var deletedCount = 0
+        var index = 0
+        while index < recordIDs.count {
+            let batch = Array(recordIDs[index..<min(index + batchSize, recordIDs.count)])
+            let operation = CKModifyRecordsOperation(recordsToSave: nil, recordIDsToDelete: batch)
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                operation.modifyRecordsResultBlock = { result in
+                    continuation.resume(with: result)
+                }
+                cloudDatabase.add(operation)
+            }
+            deletedCount += batch.count
+            index += batchSize
+        }
+        return deletedCount
+    }
+
+    func restoreCloudTrajectories(from startDate: Date, through endDate: Date) async throws -> CloudRestoreReport {
+        let metadata = try await fetchCloudTrajectoryRecords(
+            predicate: NSPredicate(format: "date != %@", "")
+        )
+        let dateRange = Self.dateStringRange(from: startDate, through: endDate)
+        let currentDeviceID = deviceID
+        let matchingIDs = await Task.detached(priority: .utility) {
+            let matching = metadata.filter { dateRange.contains($0.dateString) }
+            return Dictionary(grouping: matching, by: \.dateString).values.compactMap { records in
+                records.first(where: { $0.deviceID == currentDeviceID })?.recordID
+                    ?? records.sorted(by: { $0.recordID.recordName < $1.recordID.recordName }).first?.recordID
+            }
+        }.value
+
+        let destinationDirectory = baseDirectory
+        var restoredCount = 0
+        var skippedExistingCount = 0
+        let batchSize = 200
+        var index = 0
+        while index < matchingIDs.count {
+            let batch = Array(matchingIDs[index..<min(index + batchSize, matchingIDs.count)])
+            let results = try await cloudDatabase.records(for: batch, desiredKeys: ["date", "deviceID", "file"])
+            for (_, result) in results {
+                let record = try result.get()
+                guard let dateString = record["date"] as? String,
+                      !dateString.isEmpty,
+                      let asset = record["file"] as? CKAsset,
+                      let assetURL = asset.fileURL else { continue }
+                let destinationURL = destinationDirectory.appendingPathComponent("\(dateString).csv")
+                let didRestore = try await restoreAssetIfAbsent(
+                    from: assetURL,
+                    to: destinationURL
+                )
+                if didRestore {
+                    restoredCount += 1
+                } else {
+                    skippedExistingCount += 1
+                }
+            }
+            index += batchSize
+        }
+
+        return CloudRestoreReport(
+            restoredCount: restoredCount,
+            skippedExistingCount: skippedExistingCount
+        )
+    }
+
+    private func restoreAssetIfAbsent(from sourceURL: URL, to destinationURL: URL) async throws -> Bool {
+        try await withCheckedThrowingContinuation { continuation in
+            saveQueue.async {
+                do {
+                    let fileManager = FileManager.default
+                    guard !fileManager.fileExists(atPath: destinationURL.path) else {
+                        continuation.resume(returning: false)
+                        return
+                    }
+                    try fileManager.copyItem(at: sourceURL, to: destinationURL)
+                    continuation.resume(returning: true)
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
+    }
+
+    private func fetchCloudTrajectoryRecords(predicate: NSPredicate) async throws -> [CloudTrajectoryRecord] {
+        var records: [CloudTrajectoryRecord] = []
+        var cursor: CKQueryOperation.Cursor?
+
+        repeat {
+            let page = try await fetchCloudTrajectoryPage(predicate: cursor == nil ? predicate : nil, cursor: cursor)
+            records.append(contentsOf: page.records)
+            cursor = page.cursor
+        } while cursor != nil
+
+        return records
+    }
+
+    private func fetchCloudTrajectoryPage(
+        predicate: NSPredicate?,
+        cursor: CKQueryOperation.Cursor?
+    ) async throws -> (records: [CloudTrajectoryRecord], cursor: CKQueryOperation.Cursor?) {
+        try await withCheckedThrowingContinuation { continuation in
+            let operation: CKQueryOperation
+            if let cursor {
+                operation = CKQueryOperation(cursor: cursor)
+            } else {
+                operation = CKQueryOperation(query: CKQuery(recordType: "RawTrajectory", predicate: predicate!))
+            }
+            // Do not request the CKAsset: a storage overview must not download
+            // every trajectory file just to render this screen.
+            operation.desiredKeys = ["date", "deviceID"]
+            operation.resultsLimit = CKQueryOperation.maximumResults
+
+            let lock = NSLock()
+            var pageRecords: [CloudTrajectoryRecord] = []
+            var pageError: Error?
+            operation.recordMatchedBlock = { recordID, result in
+                lock.lock()
+                switch result {
+                case .success(let record):
+                    pageRecords.append(CloudTrajectoryRecord(
+                        recordID: recordID,
+                        dateString: record["date"] as? String ?? "",
+                        deviceID: record["deviceID"] as? String ?? ""
+                    ))
+                case .failure(let error):
+                    pageError = pageError ?? error
+                }
+                lock.unlock()
+            }
+            operation.queryResultBlock = { result in
+                switch result {
+                case .success(let nextCursor):
+                    lock.lock()
+                    let resultRecords = pageRecords
+                    let resultError = pageError
+                    lock.unlock()
+                    if let resultError {
+                        continuation.resume(throwing: resultError)
+                    } else {
+                        continuation.resume(returning: (resultRecords, nextCursor))
+                    }
+                case .failure(let error):
+                    continuation.resume(throwing: error)
+                }
+            }
+            cloudDatabase.add(operation)
+        }
+    }
+
+    /// Uploads backup copies only. Cloud records are never downloaded into the
+    /// local RawLocations directory; local files are the sole source of truth.
+    func backupToiCloud(
+        recentDays: Int? = nil,
+        from startDate: Date? = nil,
+        through endDate: Date? = nil
+    ) async throws -> Int {
+        let directoryURL = baseDirectory
+        let localFiles = try await Task.detached(priority: .utility) {
+            try FileManager.default.contentsOfDirectory(at: directoryURL, includingPropertiesForKeys: nil)
+        }.value
         var totalCount = 0
 
-        let calendar = Calendar.current
-        let lookbackDays = AppConfig.shared.cloudSyncLookbackDays
-        let cutoffDate = calendar.date(byAdding: .day, value: -lookbackDays, to: Date())! // 默认只同步最近 N 天
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yyyy-MM-dd"
-        let cutoffStr = formatter.string(from: cutoffDate)
-
         var recordsToSave: [CKRecord] = []
+        let cutoffDateString: String? = recentDays.map { days in
+            let cutoff = Calendar.current.date(byAdding: .day, value: -(max(1, days) - 1), to: Date()) ?? Date()
+            let formatter = DateFormatter()
+            formatter.calendar = Calendar(identifier: .gregorian)
+            formatter.locale = Locale(identifier: "en_US_POSIX")
+            formatter.dateFormat = "yyyy-MM-dd"
+            return formatter.string(from: cutoff)
+        }
+        let selectedDateRange = startDate.flatMap { start in
+            endDate.map { end in Self.dateStringRange(from: start, through: end) }
+        }
 
-        // 1. 收集本地待上传文件 (带上当前设备 ID)
-        if !skipUpload {
-            for localURL in localFiles {
-                let fileName = localURL.lastPathComponent
-                // 只要文件名长度正好是 14 位 (例如 2026-04-04.csv)，就视为本地待上传文件
-                guard fileName.hasSuffix(".csv") && fileName.count == 14 else { continue }
-                
-                let dateStr = fileName.replacingOccurrences(of: ".csv", with: "")
-                
-                // 如果是增量同步，且文件早于截止日期，则跳过
-                if onlyRecent && dateStr < cutoffStr { continue }
-                
-                let recordID = CKRecord.ID(recordName: "\(dateStr)-\(deviceID)")
-                
-                let record = CKRecord(recordType: "RawTrajectory", recordID: recordID)
-                record["date"] = dateStr
-                record["deviceID"] = deviceID
-                record["deviceName"] = currentDeviceName
-                record["file"] = CKAsset(fileURL: localURL)
-                recordsToSave.append(record)
-            }
+        // 收集本地待备份文件（带上当前设备 ID）
+        for localURL in localFiles {
+            let fileName = localURL.lastPathComponent
+            // 只要文件名长度正好是 14 位 (例如 2026-04-04.csv)，就视为本地待上传文件
+            guard fileName.hasSuffix(".csv") && fileName.count == 14 else { continue }
+
+            let dateStr = fileName.replacingOccurrences(of: ".csv", with: "")
+            if let cutoffDateString, dateStr < cutoffDateString { continue }
+            if let selectedDateRange, !selectedDateRange.contains(dateStr) { continue }
+            let recordID = CKRecord.ID(recordName: "\(dateStr)-\(deviceID)")
+            let record = CKRecord(recordType: "RawTrajectory", recordID: recordID)
+            record["date"] = dateStr
+            record["deviceID"] = deviceID
+            record["deviceName"] = currentDeviceName
+            record["file"] = CKAsset(fileURL: localURL)
+            recordsToSave.append(record)
         }
         
         // 批量分段上传 (每 5 个一组，防止 Assets 过大导致请求超时)
@@ -601,79 +725,27 @@ final class RawLocationStore {
             uploadIndex += batchSize
         }
 
-        // 2. 下载其他设备的文件
-        do {
-            let predicate: NSPredicate
-            if onlyRecent {
-                let calendar = Calendar.current
-                let formatter = DateFormatter()
-                formatter.dateFormat = "yyyy-MM-dd"
-                
-                var dateStrings: [String] = []
-                for i in 0..<lookbackDays {
-                    if let date = calendar.date(byAdding: .day, value: -i, to: Date()) {
-                        dateStrings.append(formatter.string(from: date))
-                    }
-                }
-                predicate = NSPredicate(format: "date IN %@", dateStrings)
-            } else {
-                // Use `date != ""` instead of `value: true` because CloudKit requires `recordName` to be queryable for `value: true`, 
-                // but `date` is already marked queryable since the `IN` query works.
-                predicate = NSPredicate(format: "date != %@", "")
-            }
-            
-            let query = CKQuery(recordType: "RawTrajectory", predicate: predicate)
-            
-            var matchResults: [(CKRecord.ID, Result<CKRecord, Error>)] = []
-            var currentCursor: CKQueryOperation.Cursor?
-            
-            let (initialResults, initialCursor) = try await cloudDatabase.records(matching: query)
-            matchResults.append(contentsOf: initialResults)
-            currentCursor = initialCursor
-            
-            while let cursor = currentCursor {
-                let (nextResults, nextCursor) = try await cloudDatabase.records(continuingMatchFrom: cursor)
-                matchResults.append(contentsOf: nextResults)
-                currentCursor = nextCursor
-            }
-            
-            for (_, result) in matchResults {
-                if let record = try? result.get() {
-                    let remoteDeviceID = record["deviceID"] as? String ?? ""
-                    let remoteDeviceName = record["deviceName"] as? String ?? ""
-                    let remoteDate = record["date"] as? String ?? ""
-                    
-                    // 只有其他设备的数据才下载
-                    if remoteDeviceID != deviceID && !remoteDate.isEmpty {
-                        if !remoteDeviceName.isEmpty {
-                            rememberKnownDeviceName(remoteDeviceName, for: remoteDeviceID)
-                        }
-                        if let asset = record["file"] as? CKAsset, let assetURL = asset.fileURL {
-                            let localFileName = "\(remoteDate)-\(remoteDeviceID).csv"
-                            let localURL = baseDirectory.appendingPathComponent(localFileName)
-                            
-                            if fileManager.fileExists(atPath: localURL.path) {
-                                try? fileManager.removeItem(at: localURL)
-                            }
-                            try? fileManager.copyItem(at: assetURL, to: localURL)
-                            totalCount += 1
-                        }
-                    }
-                }
-            }
-        } catch let error as CKError where error.code == .unknownItem {
-            // 云端还没有 RawTrajectory 表，说明是首次同步，跳过下载即可
-        } catch {
-            // 其他错误正常抛出
-            throw error
-        }
-        
-        UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: "raw_locations_last_sync")
+        UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: "raw_locations_last_backup")
         return totalCount
     }
 
-    var lastSyncDate: Date? {
-        let ts = UserDefaults.standard.double(forKey: "raw_locations_last_sync")
+    nonisolated private static func dateStringRange(
+        from startDate: Date,
+        through endDate: Date
+    ) -> ClosedRange<String> {
+        let formatter = DateFormatter()
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd"
+        let start = formatter.string(from: min(startDate, endDate))
+        let end = formatter.string(from: max(startDate, endDate))
+        return start...end
+    }
+
+    var lastBackupDate: Date? {
+        let backupTimestamp = UserDefaults.standard.double(forKey: "raw_locations_last_backup")
+        let legacyTimestamp = UserDefaults.standard.double(forKey: "raw_locations_last_sync")
+        let ts = max(backupTimestamp, legacyTimestamp)
         return ts > 0 ? Date(timeIntervalSince1970: ts) : nil
     }
 
@@ -1171,7 +1243,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
     /// 缓存有原始轨迹文件的日期，避免频繁遍历文件系统
     var availableRawDates: Set<Date> = []
     
-    /// 用于通知 UI 原始轨迹数据已更新（例如多设备同步完成）
+    /// 用于通知 UI 本地原始轨迹数据已更新
     var lastRawDataUpdateTrigger: Date = Date()
     
     private var deviceID: String {
@@ -1766,14 +1838,25 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
     private var lastLocationChangeSift: Date = .distantPast
     
     private func setupTimers() {
-        // Hourly maintenance and sync
+        // Hourly local maintenance and optional one-way raw trajectory backup.
         refreshTimer = Timer.publish(every: 3600, on: .main, in: .common)
             .autoconnect()
             .sink { [weak self] _ in
                 Task {
                     await self?.triggerTimelineSift()
                     self?.checkMidnightSift()
-                    await self?.performRawDataSync()
+                    let autoBackupEnabled = UserDefaults.standard.object(
+                        forKey: RawLocationStore.autoBackupEnabledKey
+                    ) as? Bool ?? true
+                    if autoBackupEnabled {
+                        do {
+                            _ = try await RawLocationStore.shared.backupToiCloud(
+                                recentDays: AppConfig.shared.cloudRawTrajectoryAutoBackupLookbackDays
+                            )
+                        } catch {
+                            print("Raw location automatic backup failed: \(error)")
+                        }
+                    }
                 }
             }
 
@@ -2111,26 +2194,11 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             return overridePlace
         }
 
-        guard let currentGcj = lastLocation ?? potentialStopStartLocation else { return nil }
-        
-        // 1. 找出所有在范围内的地点
-        let validMatches = allPlaces.filter { place in
-            let placeLocation = CLLocation(latitude: place.latitude, longitude: place.longitude)
-            let distance = currentGcj.distance(from: placeLocation)
-            return distance <= Double(place.radius) + 100.0
-        }
-        
-        // 优先返回用户标记为“优先识别”的地点
-        if let priorityMatch = validMatches.first(where: { $0.isPriority }) {
-            return priorityMatch
-        }
-        
-        // 2. 从符合条件的地点中，选出距离圆心最近的那一个
-        return validMatches.min { p1, p2 in
-            let d1 = currentGcj.distance(from: CLLocation(latitude: p1.latitude, longitude: p1.longitude))
-            let d2 = currentGcj.distance(from: CLLocation(latitude: p2.latitude, longitude: p2.longitude))
-            return d1 < d2
-        }
+        guard let location = lastLocation ?? potentialStopStartLocation else { return nil }
+        // Current stays must use the same established matcher as footprint
+        // creation: user-defined important places first, ordinary POIs only
+        // when no important place contains the coordinate.
+        return Self.matchedPlace(for: location.coordinate, in: allPlaces)
     }
 
     func requestPermission() {
@@ -3068,7 +3136,10 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
                     isMovingBySensor: isMovingBySensor,
                     previousCandidate: pendingDepartureLocation
                 ) {
-                    transitionToMovingAfterConfirmedDeparture(source: "location")
+                    transitionToMovingAfterConfirmedDeparture(
+                        source: "location",
+                        shouldRequestLiveActivityRecovery: isFreshLocation
+                    )
                 } else if Self.isPlausibleDepartureCandidate(
                     from: startLoc,
                     to: location,
@@ -3254,7 +3325,10 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
 
     /// Close the current stay through one path so the app row and Live Activity
     /// enter moving state together, including during a background location wake.
-    private func transitionToMovingAfterConfirmedDeparture(source: String) {
+    private func transitionToMovingAfterConfirmedDeparture(
+        source: String,
+        shouldRequestLiveActivityRecovery: Bool
+    ) {
         guard potentialStopStartLocation != nil else { return }
         potentialStopStartLocation = nil
         pendingDepartureLocation = nil
@@ -3271,7 +3345,9 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             // This is the single confirmed stay -> movement transition. Check
             // the actual ActivityKit state here instead of hoping a later Live
             // Activity refresh reaches its recovery branch.
-            CurrentLiveActivityManager.shared.notifyIfMissingForConfirmedMovement()
+            if shouldRequestLiveActivityRecovery {
+                CurrentLiveActivityManager.shared.notifyIfMissingForConfirmedMovement()
+            }
         }
 #endif
         // uiIsMoving may already be true, so its change handler is not guaranteed
@@ -3551,7 +3627,10 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
     func locationManager(_ manager: CLLocationManager, didExitRegion region: CLRegion) {
         if region.identifier == "StationaryWakeupRegion" {
             print("🚧 Exited stationary region! Waking up GPS immediately...")
-            transitionToMovingAfterConfirmedDeparture(source: "region-exit")
+            transitionToMovingAfterConfirmedDeparture(
+                source: "region-exit",
+                shouldRequestLiveActivityRecovery: true
+            )
             // 统一通过 forceHighAccuracyBoost 处理，确保出门保护期和传感器重启一并执行
             HealthManager.shared.stopActivityTracking()
             HealthManager.shared.startActivityTracking()
@@ -5672,137 +5751,6 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         }
     }
     
-    /// 执行原始轨迹数据的 iCloud 同步
-    func performRawDataSync(showOverlay: Bool = false, onlyRecent: Bool = true, skipUpload: Bool = false) async {
-        let isRawTrajectorySyncEnabled = UserDefaults.standard.object(forKey: "isRawTrajectoryICloudSyncEnabled") as? Bool ?? true
-        guard isRawTrajectorySyncEnabled else { return }
-        
-        if showOverlay {
-            await MainActor.run {
-                isSyncingInitialData = true
-                syncProgress = 0.0
-                syncStatusMessage = "正在连接 iCloud..."
-            }
-        }
-        
-        do {
-            // 模拟一些进度，因为 syncToiCloud 是黑盒且可能很快
-            if showOverlay {
-                Task {
-                    for i in 1...50 {
-                        if !isSyncingInitialData { break }
-                        try? await Task.sleep(nanoseconds: 30_000_000)
-                        await MainActor.run { syncProgress = Double(i) / 100.0 }
-                    }
-                }
-            }
-            
-            let count = try await RawLocationStore.shared.syncToiCloud(onlyRecent: onlyRecent, skipUpload: skipUpload)
-            
-            if showOverlay {
-                await MainActor.run {
-                    syncStatusMessage = "正在更新本地数据库..."
-                    syncProgress = 0.6
-                }
-            }
-            
-            if count > 0 {
-                await MainActor.run {
-                    self.refreshAvailableRawDates()
-                    self.lastRawDataUpdateTrigger = Date()
-                }
-                await self.loadPointsFromStore()
-            }
-            
-            if showOverlay {
-                // 完成最后进度
-                for i in 60...100 {
-                    try? await Task.sleep(nanoseconds: 10_000_000)
-                    await MainActor.run { syncProgress = Double(i) / 100.0 }
-                }
-                
-                await MainActor.run {
-                    syncStatusMessage = "同步完成"
-                    syncProgress = 1.0
-                    // 延迟消失
-                    Task {
-                        try? await Task.sleep(nanoseconds: 1 * 1_000_000_000)
-                        await MainActor.run {
-                            isSyncingInitialData = false
-                        }
-                    }
-                }
-            }
-        } catch {
-            print("Raw location sync failed: \(error)")
-            if showOverlay {
-                await MainActor.run {
-                    syncStatusMessage = "同步失败: \(error.localizedDescription)"
-                    Task {
-                        try? await Task.sleep(nanoseconds: 2 * 1_000_000_000)
-                        await MainActor.run {
-                            isSyncingInitialData = false
-                        }
-                    }
-                }
-            }
-        }
-    }
-    
-    /// 清理云端数据（由同步询问弹窗触发）
-    func purgeCloudData() async {
-        await MainActor.run {
-            isSyncingInitialData = true
-            syncProgress = 0.0
-            syncStatusMessage = "正在清理云端数据..."
-        }
-        
-        let containerIdentifier = "iCloud.com.ct106.difangke"
-        let container = CKContainer(identifier: containerIdentifier)
-        let database = container.privateCloudDatabase
-        let zoneID = CKRecordZone.ID(zoneName: "com.apple.coredata.cloudkit.zone")
-        
-        // 进度模拟
-        let progressTask = Task {
-            for i in 1...90 {
-                if !isSyncingInitialData { break }
-                try? await Task.sleep(nanoseconds: 20_000_000)
-                await MainActor.run { syncProgress = Double(i) / 100.0 }
-            }
-        }
-        
-        do {
-            try await database.deleteRecordZone(withID: zoneID)
-            
-            // 清理 KVS
-            let kvs = NSUbiquitousKeyValueStore.default
-            kvs.removeObject(forKey: "hasSeededDefaultData")
-            
-            if let context = modelContext {
-                // 清理可能已经同步下来的本地数据
-                let models: [any PersistentModel.Type] = [
-                    Footprint.self, Place.self, TransportManualSelection.self, ActivityType.self, DailyInsight.self
-                ]
-                for model in models {
-                    try? context.delete(model: model)
-                }
-                try? context.save()
-            }
-            
-            progressTask.cancel()
-            await MainActor.run {
-                syncProgress = 1.0
-                syncStatusMessage = "清理完成"
-            }
-        } catch {
-            print("Purge failed: \(error)")
-        }
-        
-        try? await Task.sleep(nanoseconds: 1 * 1_000_000_000)
-        await MainActor.run {
-            isSyncingInitialData = false
-        }
-    }
 }
 
 // MARK: - 坐标系转换扩展 (WGS-84 -> GCJ-02)
@@ -5985,6 +5933,11 @@ final class CurrentLiveActivityManager {
 
     func notifyIfMissingForConfirmedMovement() {
         guard CurrentLiveActivitySettings.isEnabled(for: .transport) else { return }
+        // This notification is solely a background recovery fallback. In the
+        // foreground (including every development build launch), ActivityKit
+        // can be reconciled directly and a system notification is both noisy
+        // and misleading. Cached startup fixes are filtered by the caller too.
+        guard UIApplication.shared.applicationState == .background else { return }
 
         let canDisplayActivities = ActivityAuthorizationInfo().areActivitiesEnabled
         let hasDisplayableActivity = canDisplayActivities
@@ -6057,7 +6010,7 @@ final class CurrentLiveActivityManager {
         // does not need the database, so notify before the model-context guard.
         // Otherwise the exact case this fallback is meant for returns early and
         // never tells the user that the missing Live Activity needs reopening.
-        if compatibleActivity == nil, UIApplication.shared.applicationState != .active {
+        if compatibleActivity == nil, UIApplication.shared.applicationState == .background {
             let manager = LocationManager.shared
             let currentKind: CurrentTrackingActivityKind = manager.isCurrentlyMoving
                 ? .transport

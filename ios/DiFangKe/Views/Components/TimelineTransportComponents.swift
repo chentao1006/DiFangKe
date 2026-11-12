@@ -278,6 +278,12 @@ struct TransportModalView: View {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
                     interactiveMapReady = true
                 }
+
+                // Refresh only persisted metadata. The presented Transport is
+                // the timeline-aligned snapshot and can contain synthetic
+                // endpoint padding that renders as dashed connectors; replacing
+                // it with the raw stored route would lose that geometry.
+                reloadPersistedType()
                 
                 // 默认范围不要变：显式设置 camera 为交通路径的范围，避免被 allPlaces 的 MapCircle 撑开
                 let points = transport.points
@@ -352,6 +358,11 @@ struct TransportModalView: View {
         }
     }
 
+    private func reloadPersistedType() {
+        guard let record = findRecord() else { return }
+        localManualType = TransportType(rawValue: record.manualTypeRaw ?? record.typeRaw)
+    }
+
     private var durationString: String {
         let minutes = max(1, Int(currentEndTime.timeIntervalSince(currentStartTime) / 60))
         let hours = minutes / 60
@@ -366,16 +377,34 @@ struct TransportModalView: View {
             localManualType = type
         }
         
-        // 2. Find record
-        if let record = findRecord() {
-            record.manualTypeRaw = type.rawValue
-            
-            try? modelContext.save()
-            CloudSettingsManager.shared.triggerDataSyncPulse()
-            
-            // 3. Notify parent to update UI
-            onUpdate?(type)
+        // 2. Find and persist the owning record.
+        guard let record = findRecord() else {
+            localManualType = displayedTransport.currentType
+            return
         }
+        record.manualTypeRaw = type.rawValue
+        record.typeRaw = type.rawValue
+
+        do {
+            try modelContext.save()
+        } catch {
+            localManualType = displayedTransport.currentType
+            return
+        }
+        CloudSettingsManager.shared.triggerDataSyncPulse()
+
+        // 3. Invalidate every timeline host from the owning detail view;
+        // persistence must not depend on an optional presentation callback.
+        let day = Calendar.current.startOfDay(for: record.startTime)
+        TimelineBuilder.timelineCache.removeValue(forKey: day)
+        NotificationCenter.default.post(
+            name: NSNotification.Name("FootprintDataChanged"),
+            object: nil,
+            userInfo: ["date": day]
+        )
+
+        // 4. Let the current host update any extra local state.
+        onUpdate?(type)
         
         UIImpactFeedbackGenerator(style: .medium).impactOccurred()
     }

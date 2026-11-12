@@ -212,6 +212,10 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
     }
     
     // MARK: - 应用生命周期
+
+    func applicationDidBecomeActive(_ application: UIApplication) {
+        NotificationManager.shared.removeLiveActivityRecoveryNotification()
+    }
     
     func applicationDidEnterBackground(_ application: UIApplication) {
         // 每次进入后台时重新调度后台刷新任务
