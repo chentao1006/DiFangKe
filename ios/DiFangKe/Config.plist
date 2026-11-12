@@ -274,6 +274,56 @@
 	<!-- 进行中的计划：当前位置进入下一个目的地此半径后自动标记到达（米） -->
 	<key>TRIP_PLAN_ARRIVAL_RADIUS_METERS</key>
 	<real>200</real>
+	<!-- AI 行程规划：两次收到数据之间的最长等待（秒） -->
+	<key>TRIP_AI_REQUEST_TIMEOUT</key>
+	<real>60</real>
+	<!-- AI 行程规划：每次请求携带的最近历史消息条数（用户与 AI 各算一条） -->
+	<key>TRIP_AI_HISTORY_MESSAGE_LIMIT</key>
+	<integer>12</integer>
+	<!-- AI 行程规划：生成温度 -->
+	<key>TRIP_AI_TEMPERATURE</key>
+	<real>0.5</real>
+	<!-- AI 行程规划：流式文本刷新界面的最短间隔（秒） -->
+	<key>TRIP_AI_STREAM_REFRESH_INTERVAL</key>
+	<real>0.06</real>
+	<!-- AI 行程规划：新增地点的搜索结果与参考城市/相邻地点的最大距离（公里），超出视为未找到 -->
+	<key>TRIP_AI_PLACE_MATCH_MAX_DISTANCE_KM</key>
+	<real>150</real>
+	<!-- AI 行程规划：步行/跑步前往下一站的最远合理距离（公里），超出时不采用 AI 给出的这类交通方式 -->
+	<key>TRIP_AI_WALKING_MAX_KM</key>
+	<real>5</real>
+	<!-- AI 行程规划：自行车/电动车前往下一站的最远合理距离（公里），超出时不采用 AI 给出的这类交通方式 -->
+	<key>TRIP_AI_CYCLING_MAX_KM</key>
+	<real>30</real>
+	<!-- AI 行程规划：两个地点名称互相包含时视为同一地点所需的最短名称长度（字） -->
+	<key>TRIP_AI_PLACE_NAME_MIN_CONTAINED_LENGTH</key>
+	<integer>4</integer>
+	<!-- 行程分享：地点名称包含以下任一词时视为住宿；与下面的地点类型任一满足即可 -->
+	<key>TRIP_LODGING_NAME_KEYWORDS</key>
+	<array>
+		<string>酒店</string>
+		<string>宾馆</string>
+		<string>民宿</string>
+		<string>客栈</string>
+		<string>旅馆</string>
+		<string>旅舍</string>
+		<string>青旅</string>
+		<string>公寓</string>
+		<string>度假村</string>
+		<string>hotel</string>
+		<string>hostel</string>
+		<string>resort</string>
+		<string>lodge</string>
+		<string>ホテル</string>
+		<string>旅館</string>
+	</array>
+	<!-- 行程分享：地图地点类型（MKPointOfInterestCategory）属于以下任一类时视为住宿，用于“今晚住”与住宿报备 -->
+	<key>TRIP_LODGING_POI_CATEGORIES</key>
+	<array>
+		<string>MKPOICategoryHotel</string>
+		<string>MKPOICategoryCampground</string>
+		<string>MKPOICategoryRVPark</string>
+	</array>
     <key>TAG_INHERITANCE_DISTANCE</key>
     <real>150</real>
     <key>TIMELINE_OVERLAP_TIME_TOLERANCE</key>

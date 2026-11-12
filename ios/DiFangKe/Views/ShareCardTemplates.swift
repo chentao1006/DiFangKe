@@ -52,12 +52,14 @@ enum DFKReviewShareTemplate: String, CaseIterable, Identifiable {
 
 enum DFKShareTemplate: Hashable, Identifiable {
     case trip(DFKTripShareTemplate)
+    case tripPlan(DFKTripPlanShareTemplate)
     case footprint(DFKFootprintShareTemplate)
     case review(DFKReviewShareTemplate)
 
     var id: String {
         switch self {
         case .trip(let template): return "trip.\(template.rawValue)"
+        case .tripPlan(let template): return "tripPlan.\(template.rawValue)"
         case .footprint(let template): return "footprint.\(template.rawValue)"
         case .review(let template): return "review.\(template.rawValue)"
         }
@@ -66,6 +68,7 @@ enum DFKShareTemplate: Hashable, Identifiable {
     var title: String {
         switch self {
         case .trip(let template): return template.title
+        case .tripPlan(let template): return template.title
         case .footprint(let template): return template.title
         case .review(let template): return template.title
         }
@@ -75,6 +78,8 @@ enum DFKShareTemplate: Hashable, Identifiable {
 extension DFKShareCardPayload {
     var shareTemplates: [DFKShareTemplate] {
         if isTripShare {
+            // A trip still ahead is shared as a plan; one travelled as a record.
+            if tripPlan != nil { return DFKTripPlanShareTemplate.allCases.map { .tripPlan($0) } }
             return tripSummary == nil ? [] : DFKTripShareTemplate.allCases.map { .trip($0) }
         }
         switch kind {
@@ -87,7 +92,7 @@ extension DFKShareCardPayload {
 
     var template: DFKShareTemplate {
         get {
-            if isTripShare { return .trip(tripTemplate) }
+            if isTripShare { return tripPlan != nil ? .tripPlan(tripPlanTemplate) : .trip(tripTemplate) }
             switch kind {
             case .moment, .timeline: return .footprint(footprintTemplate)
             case .stats: return .review(reviewTemplate)
@@ -96,6 +101,7 @@ extension DFKShareCardPayload {
         set {
             switch newValue {
             case .trip(let template): tripTemplate = template
+            case .tripPlan(let template): tripPlanTemplate = template
             case .footprint(let template): footprintTemplate = template
             case .review(let template): reviewTemplate = template
             }
@@ -104,6 +110,7 @@ extension DFKShareCardPayload {
 
     var templatePixelSize: CGSize {
         if case .trip(let template) = template { return template.pixelSize(for: tripSummary) }
+        if case .tripPlan(let template) = template { return template.pixelSize(for: tripPlan, dayIndex: tripPlanDayIndex) }
         return CGSize(width: 1080, height: 1920)
     }
 }

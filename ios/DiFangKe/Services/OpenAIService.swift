@@ -1004,6 +1004,131 @@ class OpenAIService {
         }.resume()
     }
     
+    // MARK: - Streaming chat
+
+    enum ChatStreamError: LocalizedError {
+        case unavailable(String)
+        case http(Int)
+        case service(String)
+        case emptyResponse
+
+        var errorDescription: String? {
+            switch self {
+            case .unavailable(let message): return message
+            case .http(let code):
+                switch code {
+                case 401, 403: return "AI 服务鉴权失败，请检查 AI 设置。"
+                case 429: return "请求太频繁了，请稍后再试。"
+                case 500...599: return "AI 服务暂时不可用，请稍后再试。"
+                default: return "AI 服务返回错误（HTTP \(code)）。"
+                }
+            case .service(let message): return message
+            case .emptyResponse: return "AI 没有返回内容，请稍后再试。"
+            }
+        }
+    }
+
+    /// Streams a chat completion through the same endpoint, credentials and model
+    /// as every other AI request. Each element is a content delta. A service that
+    /// ignores `stream` and answers with one JSON body is also accepted.
+    func streamChatCompletion(
+        messages: [[String: String]],
+        temperature: Double,
+        timeout: TimeInterval
+    ) -> AsyncThrowingStream<String, Error> {
+        let body: [String: Any] = [
+            "messages": messages,
+            "temperature": temperature,
+            "stream": true
+        ]
+        guard var request = prepareRequest(endpoint: "/chat/completions", body: body) else {
+            let message = lastError ?? "AI 服务尚未配置。"
+            return AsyncThrowingStream { $0.finish(throwing: ChatStreamError.unavailable(message)) }
+        }
+        if timeout > 0 { request.timeoutInterval = timeout }
+        request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+        let streamRequest = request
+
+        return AsyncThrowingStream { continuation in
+            let task = Task.detached(priority: .userInitiated) {
+                do {
+                    let (bytes, response) = try await URLSession.shared.bytes(for: streamRequest)
+                    let statusCode = (response as? HTTPURLResponse)?.statusCode ?? 200
+                    var plainBody = ""
+                    var receivedDelta = false
+                    for try await line in bytes.lines {
+                        try Task.checkCancellation()
+                        guard (200...299).contains(statusCode) else {
+                            plainBody += line
+                            continue
+                        }
+                        if line.hasPrefix("data:") {
+                            let payload = line.dropFirst(5).trimmingCharacters(in: .whitespaces)
+                            if payload == "[DONE]" { break }
+                            if let failure = OpenAIService.chatServiceError(in: payload) {
+                                throw ChatStreamError.service(failure)
+                            }
+                            if let delta = OpenAIService.chatStreamDelta(in: payload), !delta.isEmpty {
+                                receivedDelta = true
+                                continuation.yield(delta)
+                            }
+                        } else if !receivedDelta {
+                            plainBody += line + "\n"
+                        }
+                    }
+                    guard (200...299).contains(statusCode) else {
+                        if let failure = OpenAIService.chatServiceError(in: plainBody) {
+                            throw ChatStreamError.service(failure)
+                        }
+                        throw ChatStreamError.http(statusCode)
+                    }
+                    if !receivedDelta {
+                        if let failure = OpenAIService.chatServiceError(in: plainBody) {
+                            throw ChatStreamError.service(failure)
+                        }
+                        guard let content = OpenAIService.chatCompletionContent(in: plainBody),
+                              !content.isEmpty else {
+                            throw ChatStreamError.emptyResponse
+                        }
+                        continuation.yield(content)
+                    }
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+
+    nonisolated private static func chatJSON(_ payload: String) -> [String: Any]? {
+        guard let data = payload.data(using: .utf8) else { return nil }
+        return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+    }
+
+    nonisolated private static func chatStreamDelta(in payload: String) -> String? {
+        guard let json = chatJSON(payload),
+              let choice = (json["choices"] as? [[String: Any]])?.first else { return nil }
+        return (choice["delta"] as? [String: Any])?["content"] as? String
+            ?? (choice["message"] as? [String: Any])?["content"] as? String
+    }
+
+    nonisolated private static func chatCompletionContent(in body: String) -> String? {
+        guard let json = chatJSON(body.trimmingCharacters(in: .whitespacesAndNewlines)),
+              let choice = (json["choices"] as? [[String: Any]])?.first,
+              let content = (choice["message"] as? [String: Any])?["content"] as? String else { return nil }
+        return content.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    nonisolated private static func chatServiceError(in payload: String) -> String? {
+        guard let json = chatJSON(payload.trimmingCharacters(in: .whitespacesAndNewlines)) else { return nil }
+        if let error = json["error"] as? [String: Any] {
+            return (error["message"] as? String).map { "AI 服务返回错误：\($0)" } ?? "AI 服务返回错误。"
+        }
+        if let message = json["error"] as? String { return "AI 服务返回错误：\(message)" }
+        return nil
+    }
+
     func testConnection(completion: @escaping (Bool, String) -> Void) {
         let body: [String: Any] = ["messages": [["role": "user", "content": "Ping"]], "max_tokens": 5]
         guard let req = prepareRequest(endpoint: "/chat/completions", body: body) else { completion(false, "URL无效"); return }

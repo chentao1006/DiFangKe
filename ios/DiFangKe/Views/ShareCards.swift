@@ -12,18 +12,25 @@ private struct DFKAutoSelectingTextView: UIViewRepresentable {
         let textView = UITextView()
         textView.font = .preferredFont(forTextStyle: .body)
         textView.delegate = context.coordinator
-        textView.backgroundColor = .secondarySystemBackground
-        textView.layer.cornerRadius = 12
+        // Same input box as every multiline field (DFKInputFieldStyle).
+        textView.backgroundColor = .tertiarySystemFill
+        textView.layer.cornerRadius = DFKInputFieldStyle.cornerRadius
         textView.layer.cornerCurve = .continuous
         textView.clipsToBounds = true
-        textView.textContainerInset = UIEdgeInsets(top: 10, left: 0, bottom: 10, right: 0)
+        textView.textContainerInset = UIEdgeInsets(
+            top: DFKInputFieldStyle.verticalPadding,
+            left: DFKInputFieldStyle.horizontalPadding,
+            bottom: DFKInputFieldStyle.verticalPadding,
+            right: DFKInputFieldStyle.horizontalPadding
+        )
         textView.textContainer.lineFragmentPadding = 0
         textView.isScrollEnabled = true
         return textView
     }
 
     func updateUIView(_ textView: UITextView, context: Context) {
-        if textView.text != text {
+        // Never overwrite text while an input method is composing.
+        if textView.markedTextRange == nil, textView.text != text {
             textView.text = text
         }
         guard context.coordinator.lastSelectionRequest != selectionRequest else { return }
@@ -154,6 +161,13 @@ struct DFKShareCardPayload: Identifiable {
     var mapFallbackPoints: [CGPoint]?
     var isTripShare: Bool = false
     var tripTemplate: DFKTripShareTemplate = .ticket
+    /// Set for a trip still ahead: it is shared with the plan templates.
+    var tripPlan: DFKTripPlanShare?
+    var tripPlanTemplate: DFKTripPlanShareTemplate = .itinerary
+    /// The day the single-day plan templates show.
+    var tripPlanDayIndex = 0
+    /// Bumped each time a plan map finishes drawing in the background.
+    var tripPlanMapRevision = 0
     var footprintTemplate: DFKFootprintShareTemplate = .dial
     var reviewTemplate: DFKReviewShareTemplate = .wrapped
     var tripSummary: DFKTripShareSummary?
@@ -296,7 +310,8 @@ struct DFKShareCardPreviewView: View {
 
     @State private var editablePayload: DFKShareCardPayload
     @State private var selectedTheme: DFKShareCardTheme = .light
-    @State private var renderedImageURL: URL?
+    /// One image, or a long itinerary split into several.
+    @State private var renderedImageURLs: [URL] = []
     @State private var isRendering = false
     @State private var showingShareSheet = false
     @State private var previewZoom: CGFloat = 1
@@ -318,6 +333,8 @@ struct DFKShareCardPreviewView: View {
     @State private var isShufflingPhotos = false
     /// Photos reshuffled for one template only; the others keep theirs.
     @State private var photoPayloadByTemplate: [DFKShareTemplate: DFKShareCardPayload] = [:]
+    /// Plain-text plan being shared, for pasting into a chat.
+    @State private var sharedPlanText: String?
 
     init(payload: DFKShareCardPayload) {
         self.payload = payload
@@ -359,6 +376,7 @@ struct DFKShareCardPreviewView: View {
                 VStack(spacing: 12) {
                     titleEditorRow
                     templatePicker
+                    planDayPicker
                     shareItemPicker
                     if !editablePayload.usesTemplates {
 
@@ -370,15 +388,29 @@ struct DFKShareCardPreviewView: View {
                         .pickerStyle(.segmented)
                     }
 
-                    Button {
-                        renderAndShare()
-                    } label: {
-                        Label(isRendering ? "生成中..." : "分享给朋友", systemImage: "square.and.arrow.up")
-                            .font(.headline)
-                            .frame(maxWidth: .infinity)
+                    HStack(spacing: 10) {
+                        if let plan = editablePayload.tripPlan, !editablePayload.isLoading {
+                            Button {
+                                sharedPlanText = planText(plan)
+                            } label: {
+                                Label("文字版", systemImage: "text.alignleft")
+                                    .font(.headline)
+                                    .padding(.vertical, 6)
+                            }
+                            .buttonStyle(.bordered)
+                            .buttonBorderShape(.capsule)
+                            .accessibilityHint("以文字分享这份行程，可直接粘贴到聊天里")
+                        }
+                        Button {
+                            renderAndShare()
+                        } label: {
+                            Label(isRendering ? "生成中..." : "分享给朋友", systemImage: "square.and.arrow.up")
+                                .font(.headline)
+                                .frame(maxWidth: .infinity)
+                        }
+                        .dfkPrimaryActionButtonStyle()
+                        .disabled(isRendering || editablePayload.isLoading)
                     }
-                    .dfkPrimaryActionButtonStyle()
-                    .disabled(isRendering || editablePayload.isLoading)
 
                 }
                 .padding(16)
@@ -394,8 +426,16 @@ struct DFKShareCardPreviewView: View {
                 }
             }
             .sheet(isPresented: $showingShareSheet) {
-                if let renderedImageURL {
-                    ActivityView(activityItems: [renderedImageURL])
+                if !renderedImageURLs.isEmpty {
+                    ActivityView(activityItems: renderedImageURLs)
+                }
+            }
+            .sheet(isPresented: Binding(
+                get: { sharedPlanText != nil },
+                set: { if !$0 { sharedPlanText = nil } }
+            )) {
+                if let sharedPlanText {
+                    ActivityView(activityItems: [sharedPlanText])
                 }
             }
             .sheet(isPresented: $showingTextEditor) {
@@ -455,6 +495,9 @@ struct DFKShareCardPreviewView: View {
                 }
             } message: {
                 Text("请先在设置中开启 AI 智能辅助，才能生成分享标题。")
+            }
+            .onChange(of: payload.tripPlanMapRevision) { _, _ in
+                mergePlanMaps()
             }
             .onChange(of: payload.version) { _, _ in
                 editablePayload = payload
@@ -536,6 +579,54 @@ struct DFKShareCardPreviewView: View {
         }
     }
 
+    /// The single-day plan cards show the day picked here.
+    @ViewBuilder
+    private var planDayPicker: some View {
+        if case .tripPlan(let template) = editablePayload.template,
+           template.isSingleDay,
+           let plan = editablePayload.tripPlan,
+           plan.days.count > 1,
+           !editablePayload.isLoading {
+            ScrollViewReader { proxy in
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        ForEach(plan.days) { day in
+                            let isSelected = day.index == editablePayload.tripPlanDayIndex
+                            Button {
+                                editablePayload.tripPlanDayIndex = day.index
+                            } label: {
+                                Text(plan.dayChipText(day))
+                                    .font(.subheadline.weight(isSelected ? .semibold : .regular))
+                            }
+                            .buttonStyle(.bordered)
+                            .buttonBorderShape(.capsule)
+                            .tint(isSelected ? Color.dfkAccent : Color.secondary)
+                            .id(day.index)
+                        }
+                    }
+                    .padding(.vertical, 2)
+                }
+                .onAppear { proxy.scrollTo(editablePayload.tripPlanDayIndex, anchor: .center) }
+            }
+        }
+    }
+
+    /// Takes what the background pass filled in (lodging, maps) into the
+    /// preview. The plan itself is never edited here, so it is replaced
+    /// whole; the title, template and day picked meanwhile are kept.
+    private func mergePlanMaps() {
+        guard let incoming = payload.tripPlan, editablePayload.tripPlan != nil else { return }
+        editablePayload.tripPlan = incoming
+    }
+
+    /// The single-day cards share their day; the others the whole plan.
+    private func planText(_ plan: DFKTripPlanShare) -> String {
+        if case .tripPlan(let template) = editablePayload.template, template.isSingleDay {
+            return plan.plainText(title: editablePayload.title, dayIndex: editablePayload.tripPlanDayIndex)
+        }
+        return plan.plainText(title: editablePayload.title)
+    }
+
     private func templateThumbnail(_ template: DFKShareTemplate) -> some View {
         let isSelected = editablePayload.template == template
         let thumbnailWidth: CGFloat = 64
@@ -576,6 +667,8 @@ struct DFKShareCardPreviewView: View {
         case .trip:
             return editablePayload.tripPhotoShuffler != nil
                 && !(editablePayload.tripSummary?.placePhotos.isEmpty ?? true)
+        case .tripPlan:
+            return false
         case .footprint:
             return editablePayload.heroImages.count > 1
         case .review:
@@ -632,6 +725,8 @@ struct DFKShareCardPreviewView: View {
                 if let summary = current.tripSummary, let shuffler = current.tripPhotoShuffler {
                     shuffled.tripSummary = await shuffler(summary)
                 }
+            case .tripPlan:
+                break
             case .footprint:
                 let order = Array(current.heroImages.indices).shuffled()
                 shuffled.heroImages = order.map { current.heroImages[$0] }
@@ -1009,6 +1104,9 @@ struct DFKShareCardPreviewView: View {
     }
 
     private var shareTitleScenarioInstruction: String {
+        if editablePayload.tripPlan != nil {
+            return "这是一份还没有完成的行程计划，用来分享给同行的人或亲友。标题要体现目的地和这趟行程的主线，可以带一点出发前的期待，但不能写成已经去过、已经玩过的经历。"
+        }
         switch editablePayload.kind {
         case .stats:
             return "这是一个统计时间区间内的生活总结，不是单日行程。必须基于所给时间范围概括整个统计周期，严禁写成“一日盘点”“一天”“今日”“当日”或任何单日叙事。"
@@ -1033,42 +1131,78 @@ struct DFKShareCardPreviewView: View {
     private func renderAndShare() {
         guard !editablePayload.isLoading else { return }
         isRendering = true
-        renderedImageURL = nil
-        let exportPayload = templatePayload(for: editablePayload.template)
-        let targetSize = DFKShareCardView.pixelSize(for: exportPayload)
-        let renderer = ImageRenderer(
-            content: DFKShareCardView(payload: exportPayload, theme: selectedTheme)
-                .frame(width: targetSize.width, height: targetSize.height)
-        )
-        renderer.proposedSize = ProposedViewSize(targetSize)
+        renderedImageURLs = []
         // WeChat and pasteboard providers are unreliable with extra-tall raw
         // bitmaps. Keep all content but scale long cards to an 8192 px maximum.
-        let exportScale = min(CGFloat(1), CGFloat(8_192) / targetSize.height)
-        renderer.scale = exportScale
-        // The card has a fully opaque canvas. Avoid an AlphaPremulLast bitmap,
-        // which doubles decode memory for long timeline exports.
-        renderer.isOpaque = true
-        // ImageRenderer must run on main; flattening, JPEG encoding and file IO
-        // run off main with only the rendered bitmap and resolved color.
-        guard let renderedCGImage = renderer.cgImage else {
+        let maximumHeight: CGFloat = 8_192
+        var rendered: [(image: CGImage, scale: CGFloat)] = []
+        for exportPayload in Self.exportPages(templatePayload(for: editablePayload.template), maximumHeight: maximumHeight) {
+            let targetSize = DFKShareCardView.pixelSize(for: exportPayload)
+            let renderer = ImageRenderer(
+                content: DFKShareCardView(payload: exportPayload, theme: selectedTheme)
+                    .frame(width: targetSize.width, height: targetSize.height)
+            )
+            renderer.proposedSize = ProposedViewSize(targetSize)
+            let exportScale = min(CGFloat(1), maximumHeight / targetSize.height)
+            renderer.scale = exportScale
+            // The card has a fully opaque canvas. Avoid an AlphaPremulLast bitmap,
+            // which doubles decode memory for long timeline exports.
+            renderer.isOpaque = true
+            // ImageRenderer must run on main; flattening, JPEG encoding and file IO
+            // run off main with only the rendered bitmap and resolved color.
+            guard let renderedCGImage = renderer.cgImage else { continue }
+            rendered.append((renderedCGImage, exportScale))
+        }
+        guard !rendered.isEmpty else {
             isRendering = false
             showingShareSheet = false
             return
         }
-        let imageScale = exportScale
         let backgroundColor = UIColor(selectedTheme.background).cgColor
         Task { @MainActor in
-            let url = await Task.detached(priority: .userInitiated) {
-                Self.writeShareJPEG(
-                    cgImage: renderedCGImage,
-                    scale: imageScale,
-                    backgroundColor: backgroundColor
-                )
+            let urls = await Task.detached(priority: .userInitiated) {
+                rendered.compactMap { page in
+                    Self.writeShareJPEG(
+                        cgImage: page.image,
+                        scale: page.scale,
+                        backgroundColor: backgroundColor
+                    )
+                }
             }.value
-            renderedImageURL = url
+            renderedImageURLs = urls
             isRendering = false
-            showingShareSheet = url != nil
+            showingShareSheet = !urls.isEmpty
         }
+    }
+
+    /// The images one export produces. A plan itinerary too tall for one
+    /// legible image is split into consecutive days, each part a full card
+    /// with the header and footer; everything else is a single image.
+    private static func exportPages(_ payload: DFKShareCardPayload, maximumHeight: CGFloat) -> [DFKShareCardPayload] {
+        guard case .tripPlan(let template) = payload.template,
+              template == .itinerary,
+              let plan = payload.tripPlan,
+              DFKShareCardView.pixelSize(for: payload).height > maximumHeight else {
+            return [payload]
+        }
+        func page(_ days: [DFKTripPlanShare.Day]) -> DFKShareCardPayload {
+            var page = payload
+            page.tripPlan?.days = days
+            return page
+        }
+        var pages: [DFKShareCardPayload] = []
+        var current: [DFKTripPlanShare.Day] = []
+        for day in plan.days {
+            let candidate = current + [day]
+            if !current.isEmpty, DFKShareCardView.pixelSize(for: page(candidate)).height > maximumHeight {
+                pages.append(page(current))
+                current = [day]
+            } else {
+                current = candidate
+            }
+        }
+        if !current.isEmpty { pages.append(page(current)) }
+        return pages
     }
 
     nonisolated private static func writeShareJPEG(
@@ -1451,6 +1585,19 @@ struct DFKShareCardView: View {
                         template: template,
                         summary: summary,
                         title: payload.title,
+                        brandName: payload.brandName,
+                        brandSlogan: payload.brandSlogan,
+                        displayScale: displayScale,
+                        qrCode: qrCode
+                    )
+                }
+            case .tripPlan(let template):
+                if let plan = payload.tripPlan {
+                    DFKTripPlanShareTemplateView(
+                        template: template,
+                        plan: plan,
+                        title: payload.title,
+                        dayIndex: payload.tripPlanDayIndex,
                         brandName: payload.brandName,
                         brandSlogan: payload.brandSlogan,
                         displayScale: displayScale,

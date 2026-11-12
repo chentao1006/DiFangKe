@@ -65,28 +65,39 @@ class PlacePickerViewModel: NSObject, ObservableObject {
             try? await Task.sleep(nanoseconds: 550_000_000)
             guard !Task.isCancelled, activeQuery == normalizedQuery else { return }
 
-            let nearbyResults = await searchMapItems(query: normalizedQuery, near: userCoord)
-            guard !Task.isCancelled else { return }
-            // City names and distant destinations must not be constrained to
-            // the user's current map viewport.
-            let globalResults = nearbyResults.isEmpty
-                ? await searchMapItems(query: normalizedQuery, near: nil)
-                : nearbyResults
+            let resolvedResults = await candidates(for: normalizedQuery, near: userCoord)
             guard !Task.isCancelled, activeQuery == normalizedQuery else { return }
-
-            // Apple Maps can return unrelated local fuzzy matches for overseas
-            // names (for example, “东.Dong” for “东京”). Prefer an exact result
-            // from the OpenStreetMap fallback when one is available.
-            let fallbackResults = await OpenStreetMapGeocoder.shared.search(query: normalizedQuery)
-            guard !Task.isCancelled, activeQuery == normalizedQuery else { return }
-            let convertedFallback = fallbackResults.map {
-                PlaceSearchResult(name: $0.name, address: $0.address, coordinate: $0.coordinate)
-            }
-            let resolvedResults = prioritizeExactMatches(convertedFallback, over: globalResults, query: normalizedQuery)
             searchResults = preservingArrivalOrder(existing: searchResults, appending: resolvedResults)
             finalizedQuery = normalizedQuery
             isSearching = false
         }
+    }
+
+    /// Full search pipeline for one query, without debounce or completer
+    /// results. Used by the interactive search and by callers that resolve a
+    /// place name programmatically.
+    func candidates(for query: String, near coordinate: CLLocationCoordinate2D?) async -> [PlaceSearchResult] {
+        let normalizedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedQuery.isEmpty else { return [] }
+
+        let nearbyResults = await searchMapItems(query: normalizedQuery, near: coordinate)
+        guard !Task.isCancelled else { return [] }
+        // City names and distant destinations must not be constrained to
+        // the user's current map viewport.
+        let globalResults = nearbyResults.isEmpty
+            ? await searchMapItems(query: normalizedQuery, near: nil)
+            : nearbyResults
+        guard !Task.isCancelled else { return [] }
+
+        // Apple Maps can return unrelated local fuzzy matches for overseas
+        // names (for example, “东.Dong” for “东京”). Prefer an exact result
+        // from the OpenStreetMap fallback when one is available.
+        let fallbackResults = await OpenStreetMapGeocoder.shared.search(query: normalizedQuery)
+        guard !Task.isCancelled else { return [] }
+        let convertedFallback = fallbackResults.map {
+            PlaceSearchResult(name: $0.name, address: $0.address, coordinate: $0.coordinate)
+        }
+        return prioritizeExactMatches(convertedFallback, over: globalResults, query: normalizedQuery)
     }
 
     private func searchMapItems(query: String, near coordinate: CLLocationCoordinate2D?) async -> [PlaceSearchResult] {

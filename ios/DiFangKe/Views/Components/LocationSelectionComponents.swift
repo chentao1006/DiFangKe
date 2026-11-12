@@ -49,27 +49,62 @@ struct DFKIMETextField: UIViewRepresentable {
 
 /// Multiline counterpart of `DFKIMETextField`. The placeholder remains in
 /// SwiftUI, while the native text view exclusively owns in-progress marked text.
+/// The one look for multiline text inputs: a filled, rounded box, so a field
+/// reads as editable at a glance on cards, grouped backgrounds and materials.
+enum DFKInputFieldStyle {
+    static let fill = Color(uiColor: .tertiarySystemFill)
+    static let cornerRadius: CGFloat = 12
+    static let horizontalPadding: CGFloat = 12
+    static let verticalPadding: CGFloat = 10
+}
+
 struct DFKIMEMultilineTextField: View {
     let placeholder: String
     @Binding var text: String
     var minHeight: CGFloat = 36
+    /// When set, the field grows with its text up to this height and then
+    /// scrolls internally instead of growing further.
+    var maxHeight: CGFloat? = nil
+    /// Draws the standard input box. Only a container that already is the
+    /// input's chrome (the AI chat composer) turns it off.
+    var showsInputBox = true
 
     var body: some View {
-        ZStack(alignment: .topLeading) {
+        let field = ZStack(alignment: .topLeading) {
             if text.isEmpty {
                 Text(placeholder)
                     .foregroundStyle(.tertiary)
-                    .padding(.top, 7)
+                    .padding(.top, DFKIMETextView.verticalInset)
                     .allowsHitTesting(false)
             }
-            DFKIMETextView(text: $text)
+            DFKIMETextView(text: $text, minHeight: minHeight, maxHeight: maxHeight)
         }
-        .frame(minHeight: minHeight)
+        // Text starts at the top like any editor; extra height stays below it.
+        .frame(minHeight: minHeight, alignment: .topLeading)
+
+        if showsInputBox {
+            field
+                .padding(.horizontal, DFKInputFieldStyle.horizontalPadding)
+                .padding(.vertical, DFKInputFieldStyle.verticalPadding - DFKIMETextView.verticalInset)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(
+                    DFKInputFieldStyle.fill,
+                    in: RoundedRectangle(cornerRadius: DFKInputFieldStyle.cornerRadius, style: .continuous)
+                )
+        } else {
+            field
+        }
     }
 }
 
 private struct DFKIMETextView: UIViewRepresentable {
+    static let verticalInset: CGFloat = 7
+
     @Binding var text: String
+    /// The text view fills at least this height, so a tap anywhere in the
+    /// field starts editing; its text still starts at the top.
+    var minHeight: CGFloat = 0
+    var maxHeight: CGFloat? = nil
 
     func makeUIView(context: Context) -> UITextView {
         let textView = UITextView()
@@ -77,8 +112,11 @@ private struct DFKIMETextView: UIViewRepresentable {
         textView.backgroundColor = .clear
         textView.font = .preferredFont(forTextStyle: .body)
         textView.isScrollEnabled = false
-        textView.textContainerInset = UIEdgeInsets(top: 7, left: -5, bottom: 7, right: 0)
+        // Text lines up with the placeholder; the box provides side padding.
+        textView.textContainerInset = UIEdgeInsets(top: Self.verticalInset, left: 0, bottom: Self.verticalInset, right: 0)
         textView.textContainer.lineFragmentPadding = 0
+        // Wrap to the width SwiftUI offers instead of asking for one long line.
+        textView.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         return textView
     }
 
@@ -87,20 +125,95 @@ private struct DFKIMETextView: UIViewRepresentable {
         textView.text = text
     }
 
+    /// With scrolling off, a text view's intrinsic size is its text on a single
+    /// line, which SwiftUI would lay out unwrapped and centered past the edges.
+    /// Measure the height for the offered width so the text wraps.
+    func sizeThatFits(_ proposal: ProposedViewSize, uiView textView: UITextView, context: Context) -> CGSize? {
+        guard let width = proposal.width, width > 0, width.isFinite else { return nil }
+        let fitting = textView.sizeThatFits(CGSize(width: width, height: .greatestFiniteMagnitude))
+        let height = max(fitting.height, minHeight)
+        guard let maxHeight else {
+            return CGSize(width: width, height: height)
+        }
+        let shouldScroll = fitting.height > maxHeight
+        if textView.isScrollEnabled != shouldScroll {
+            DispatchQueue.main.async { textView.isScrollEnabled = shouldScroll }
+        }
+        return CGSize(width: width, height: min(height, maxHeight))
+    }
+
     func makeCoordinator() -> Coordinator {
         Coordinator(text: $text)
     }
 
     final class Coordinator: NSObject, UITextViewDelegate {
         @Binding private var text: String
+        private weak var editingTextView: UITextView?
 
         init(text: Binding<String>) {
             _text = text
+            super.init()
+            NotificationCenter.default.addObserver(
+                self,
+                selector: #selector(keyboardDidShow),
+                name: UIResponder.keyboardDidShowNotification,
+                object: nil
+            )
+        }
+
+        deinit {
+            NotificationCenter.default.removeObserver(self)
+        }
+
+        func textViewDidBeginEditing(_ textView: UITextView) {
+            editingTextView = textView
+            // The keyboard may already be up when moving between fields.
+            DispatchQueue.main.async { [weak self, weak textView] in
+                guard let textView else { return }
+                self?.revealInEnclosingScrollView(textView, wholeField: true)
+            }
+        }
+
+        func textViewDidEndEditing(_ textView: UITextView) {
+            if editingTextView === textView { editingTextView = nil }
         }
 
         func textViewDidChange(_ textView: UITextView) {
             text = textView.text
             textView.invalidateIntrinsicContentSize()
+            // Keep the caret above the keyboard as the field grows.
+            DispatchQueue.main.async { [weak self, weak textView] in
+                guard let textView else { return }
+                self?.revealInEnclosingScrollView(textView, wholeField: false)
+            }
+        }
+
+        /// SwiftUI's scroll view shrinks for the keyboard but doesn't scroll a
+        /// UIKit text view into the remaining space, so reveal it once the
+        /// keyboard has settled.
+        @objc private func keyboardDidShow() {
+            guard let textView = editingTextView, textView.isFirstResponder else { return }
+            revealInEnclosingScrollView(textView, wholeField: true)
+        }
+
+        private func revealInEnclosingScrollView(_ textView: UITextView, wholeField: Bool) {
+            var ancestor = textView.superview
+            while let view = ancestor, !(view is UIScrollView) {
+                ancestor = view.superview
+            }
+            guard let scrollView = ancestor as? UIScrollView else { return }
+
+            let margin = DFKInputFieldStyle.verticalPadding + 8
+            let caretRect = textView.selectedTextRange.map { textView.caretRect(for: $0.end) }
+                ?? CGRect(x: 0, y: textView.bounds.maxY - 1, width: 1, height: 1)
+            let caret = textView.convert(caretRect, to: scrollView)
+            let field = textView.convert(textView.bounds, to: scrollView)
+            let visibleHeight = scrollView.bounds.height
+                - scrollView.adjustedContentInset.top
+                - scrollView.adjustedContentInset.bottom
+            // Show the whole field when it fits; otherwise just the caret line.
+            let target = wholeField && field.height + margin * 2 <= visibleHeight ? field : caret
+            scrollView.scrollRectToVisible(target.insetBy(dx: 0, dy: -margin), animated: true)
         }
     }
 }
@@ -135,11 +248,13 @@ struct IMESafeMultilineTextField: View {
 extension View {
     func dfkMultilineInputStyle() -> some View {
         textFieldStyle(.plain)
-            .padding(.horizontal, 12)
-            .padding(.vertical, 10)
+            .padding(.horizontal, DFKInputFieldStyle.horizontalPadding)
+            .padding(.vertical, DFKInputFieldStyle.verticalPadding)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(Color(uiColor: .secondarySystemBackground))
-            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .background(
+                DFKInputFieldStyle.fill,
+                in: RoundedRectangle(cornerRadius: DFKInputFieldStyle.cornerRadius, style: .continuous)
+            )
     }
 }
 

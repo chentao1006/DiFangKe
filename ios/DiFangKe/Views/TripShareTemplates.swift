@@ -191,12 +191,7 @@ struct DFKTripShareTemplateView<QRCode: View>: View {
     }
 
     private static func color(for type: TransportType?) -> Color {
-        switch type?.category ?? 0 {
-        case 1: return Color(red: 0.76, green: 0.34, blue: 0.17)
-        case 2, 3: return Color(red: 0.25, green: 0.35, blue: 0.40)
-        case 4: return type == .subway ? Color(red: 0.25, green: 0.35, blue: 0.40) : Color.dfkAccent
-        default: return .gray
-        }
+        type?.shareTint ?? .gray
     }
 
     // MARK: Ticket

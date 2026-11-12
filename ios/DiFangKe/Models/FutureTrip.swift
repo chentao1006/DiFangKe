@@ -216,6 +216,19 @@ final class TripItem {
     }
 }
 
+extension TripItem {
+    /// The user's note for the leg arriving at this stop: flight number,
+    /// train, station, meeting point. Kept in the existing `lineName` field so
+    /// the trip store's schema doesn't change.
+    var transportNotes: String {
+        get { lineName ?? "" }
+        set {
+            let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            lineName = trimmed.isEmpty ? nil : newValue
+        }
+    }
+}
+
 /// Single-row user setting. The city is selected manually; it is never inferred.
 @Model
 final class HomeCity {

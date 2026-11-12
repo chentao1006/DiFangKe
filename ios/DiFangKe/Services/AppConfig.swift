@@ -54,6 +54,10 @@ class AppConfig {
     func int(forKey key: String) -> Int {
         return config[key] as? Int ?? 0
     }
+
+    func stringArray(forKey key: String) -> [String] {
+        config[key] as? [String] ?? []
+    }
     
     func uint64(forKey key: String) -> UInt64 {
         if let val = config[key] as? NSNumber {
@@ -201,6 +205,29 @@ class AppConfig {
 
     var tripPlanArrivalRadiusMeters: Double {
         double(forKey: "TRIP_PLAN_ARRIVAL_RADIUS_METERS")
+    }
+
+    var tripAIRequestTimeout: TimeInterval { double(forKey: "TRIP_AI_REQUEST_TIMEOUT") }
+    var tripAIHistoryMessageLimit: Int { max(0, int(forKey: "TRIP_AI_HISTORY_MESSAGE_LIMIT")) }
+    var tripAITemperature: Double { double(forKey: "TRIP_AI_TEMPERATURE") }
+    var tripAIStreamRefreshInterval: TimeInterval { double(forKey: "TRIP_AI_STREAM_REFRESH_INTERVAL") }
+    var tripAIPlaceMatchMaxDistanceKm: Double { double(forKey: "TRIP_AI_PLACE_MATCH_MAX_DISTANCE_KM") }
+    var tripAIWalkingMaxKm: Double { double(forKey: "TRIP_AI_WALKING_MAX_KM") }
+    var tripAICyclingMaxKm: Double { double(forKey: "TRIP_AI_CYCLING_MAX_KM") }
+    var tripAIPlaceNameMinContainedLength: Int { int(forKey: "TRIP_AI_PLACE_NAME_MIN_CONTAINED_LENGTH") }
+    var tripLodgingNameKeywords: [String] { stringArray(forKey: "TRIP_LODGING_NAME_KEYWORDS") }
+    var tripLodgingPOICategories: [String] { stringArray(forKey: "TRIP_LODGING_POI_CATEGORIES") }
+
+    /// Farthest planned leg that is reasonable for a self-powered transport
+    /// type; nil when the type has no such limit.
+    func tripAIMaxLegKm(for type: TransportType) -> Double? {
+        let limit: Double
+        switch type {
+        case .slow, .running: limit = tripAIWalkingMaxKm
+        case .bicycle, .ebike: limit = tripAICyclingMaxKm
+        default: return nil
+        }
+        return limit > 0 ? limit : nil
     }
 
     var ridiculousAccuracyThreshold: Double {
