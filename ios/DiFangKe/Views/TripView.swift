@@ -10560,15 +10560,15 @@ private struct TripEditorView: View {
                         selectionEnabled: selectionEnabled,
                         onSelect: { placeTarget = PlaceTarget(day: day, item: stop) }
                     )
-                    .background {
-                        GeometryReader { proxy in
-                            Color.clear
-                                .onAppear { updateItemDragFrame(stop.id, frame: proxy.frame(in: .global)) }
-                                .onChange(of: proxy.frame(in: .global)) { _, frame in
-                                    updateItemDragFrame(stop.id, frame: frame)
-                                }
+                }
+            }
+            .background {
+                GeometryReader { proxy in
+                    Color.clear
+                        .onAppear { updateItemDragFrame(stop.id, frame: proxy.frame(in: .global)) }
+                        .onChange(of: proxy.frame(in: .global)) { _, frame in
+                            updateItemDragFrame(stop.id, frame: frame)
                         }
-                    }
                 }
             }
             .background {
@@ -12117,8 +12117,8 @@ private struct TripReorderDragSource: UIViewRepresentable {
             let dragItem = UIDragItem(itemProvider: provider)
             dragItem.localObject = itemID
             dragItem.previewProvider = Self.invisibleSystemPreview
-            // This is the first point at which the long press has been accepted
-            // as a drag. Start both visual and haptic feedback before movement.
+            // A recognized long press enters reorder mode immediately, even
+            // before the finger starts moving.
             guard beginOwnedDrag(interaction: interaction, session: session) else { return [] }
             UIImpactFeedbackGenerator(style: .medium).impactOccurred(intensity: 0.9)
             return [dragItem]
@@ -12130,8 +12130,14 @@ private struct TripReorderDragSource: UIViewRepresentable {
             session: UIDragSession
         ) {
             animator.addCompletion { [weak self, weak interaction] position in
-                guard position == .end, let interaction else { return }
-                _ = self?.beginOwnedDrag(interaction: interaction, session: session)
+                guard let self else { return }
+                if position == .end, let interaction {
+                    _ = self.beginOwnedDrag(interaction: interaction, session: session)
+                } else {
+                    // UIKit may abandon the lift before starting a drag
+                    // session when the finger is released without moving.
+                    self.finishOwnedDrag()
+                }
             }
         }
 
@@ -12230,18 +12236,20 @@ private struct TripReorderDragSource: UIViewRepresentable {
             guard let window = sourceView.window,
                   previewFrame.width > 1,
                   previewFrame.height > 1 else { return nil }
-            let frameInWindow = window.convert(previewFrame, from: nil)
-            let format = UIGraphicsImageRendererFormat()
-            format.scale = window.screen.scale
-            format.opaque = false
-            let image = UIGraphicsImageRenderer(size: frameInWindow.size, format: format).image { context in
-                context.cgContext.translateBy(x: -frameInWindow.minX, y: -frameInWindow.minY)
-                window.layer.render(in: context.cgContext)
-            }
-            let preview = UIImageView(image: image)
-            preview.frame = frameInWindow
-            preview.contentMode = .scaleToFill
-            return preview
+            let frameInWindow = window.convert(previewFrame, from: window.screen.coordinateSpace)
+            guard let preview = window.resizableSnapshotView(
+                from: frameInWindow,
+                afterScreenUpdates: false,
+                withCapInsets: .zero
+            ) else { return nil }
+            let container = UIView(frame: frameInWindow)
+            container.backgroundColor = .clear
+            preview.frame = container.bounds
+            preview.layer.cornerRadius = 16
+            preview.layer.cornerCurve = .continuous
+            preview.layer.masksToBounds = true
+            container.addSubview(preview)
+            return container
         }
 
         private func removeFloatingPreview() {
