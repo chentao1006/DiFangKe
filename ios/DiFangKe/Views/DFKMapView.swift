@@ -443,6 +443,67 @@ private struct DFKMapContent {
     var drawsStandalonePhotosInSnapshot = false
 }
 
+private enum DFKTransportRouteHitTesting {
+    struct Route: @unchecked Sendable {
+        let id: UUID
+        let coordinates: [CLLocationCoordinate2D]
+    }
+
+    static func hitTransportID(
+        at coordinate: CLLocationCoordinate2D,
+        routes: [Route],
+        region: MKCoordinateRegion,
+        viewWidth: CGFloat
+    ) -> UUID? {
+        guard viewWidth > 0 else { return nil }
+        let west = MKMapPoint(CLLocationCoordinate2D(
+            latitude: region.center.latitude,
+            longitude: region.center.longitude - region.span.longitudeDelta / 2
+        ))
+        let east = MKMapPoint(CLLocationCoordinate2D(
+            latitude: region.center.latitude,
+            longitude: region.center.longitude + region.span.longitudeDelta / 2
+        ))
+        let mapPointsPerScreenPoint = abs(east.x - west.x) / max(Double(viewWidth), 1)
+        let hitDistance = mapPointsPerScreenPoint * 24
+        let tap = MKMapPoint(coordinate)
+        var best: (id: UUID, squaredDistance: Double)?
+
+        for route in routes where route.coordinates.count >= 2 {
+            let points = route.coordinates.map { MKMapPoint($0) }
+            for (start, end) in zip(points, points.dropFirst()) {
+                let squaredDistance = squaredDistance(from: tap, toSegmentFrom: start, to: end)
+                if best == nil || squaredDistance < best!.squaredDistance {
+                    best = (route.id, squaredDistance)
+                }
+            }
+        }
+        guard let best, best.squaredDistance <= hitDistance * hitDistance else { return nil }
+        return best.id
+    }
+
+    private static func squaredDistance(
+        from point: MKMapPoint,
+        toSegmentFrom start: MKMapPoint,
+        to end: MKMapPoint
+    ) -> Double {
+        let dx = end.x - start.x
+        let dy = end.y - start.y
+        let lengthSquared = dx * dx + dy * dy
+        guard lengthSquared > 0 else {
+            let pointDX = point.x - start.x
+            let pointDY = point.y - start.y
+            return pointDX * pointDX + pointDY * pointDY
+        }
+        let projection = min(max(((point.x - start.x) * dx + (point.y - start.y) * dy) / lengthSquared, 0), 1)
+        let projectedX = start.x + projection * dx
+        let projectedY = start.y + projection * dy
+        let pointDX = point.x - projectedX
+        let pointDY = point.y - projectedY
+        return pointDX * pointDX + pointDY * pointDY
+    }
+}
+
 private enum DFKMapContentBuilder {
     struct Request {
         let key: Int
@@ -1519,6 +1580,7 @@ struct DFKMapView: View {
     @State private var aggregatedSourceKey: String?
     @State private var liveMapPhotoAssetIDs: [String] = []
     @State private var liveMapPhotoAssetKey = 0
+    @State private var annotationTapRevision = 0
     @Environment(\.colorScheme) private var colorScheme
 
     private var hasVisibleContent: Bool {
@@ -2049,7 +2111,8 @@ struct DFKMapView: View {
                                 onUserLocationTap: onUserLocationTap
                             )
                         } else {
-                            Map(position: $cameraPosition) {
+                            MapReader { mapProxy in
+                                Map(position: $cameraPosition) {
                                 if showsUserDefinedPlaceRadii {
                                     ForEach(userDefinedPlaces) { place in
                                         MapCircle(center: place.coordinate, radius: max(5, min(place.radius, 10_000)))
@@ -2073,6 +2136,7 @@ struct DFKMapView: View {
                                 ForEach(validPhotoAnnotations, id: \.asset.localIdentifier) { entry in
                                     Annotation("", coordinate: entry.coordinate, anchor: .bottom) {
                                         Button {
+                                            annotationTapRevision &+= 1
                                             onPhotoTap?(entry.asset)
                                         } label: {
                                             photoAnnotationContent(for: entry.asset)
@@ -2109,50 +2173,62 @@ struct DFKMapView: View {
                                 if showsUserLocation {
                                     UserAnnotation()
                                 }
-                            }
-                            .id(timelineUpdateIdentifier ?? 0)
-                            .mapStyle(.standard(elevation: .automatic, emphasis: .muted))
-                            .onMapCameraChange(frequency: .onEnd) { context in
-                                transportVisibleRegion = context.region
-                                if clustersPlacesByMapScale {
-                                    placeClusterVisibleRegion = context.region
                                 }
-                            }
-                            // Handle taps on the map surface itself. Native map
-                            // controls are subviews and must keep their own taps
-                            // without forwarding them to the host's collapse action.
-                            .simultaneousGesture(
-                                TapGesture().onEnded { onMapInteraction?(.tap) },
-                                including: .gesture
-                            )
-                            .simultaneousGesture(DragGesture(minimumDistance: 8).onChanged { _ in onMapInteraction?(.pan) })
-                            .simultaneousGesture(MagnificationGesture().onChanged { _ in onMapInteraction?(.zoom) })
-                            .mapControls {
-                                if showsMapControls {
-                                    if showsUserLocation {
-                                        MapUserLocationButton()
+                                .id(timelineUpdateIdentifier ?? 0)
+                                .mapStyle(.standard(elevation: .automatic, emphasis: .muted))
+                                .onMapCameraChange(frequency: .onEnd) { context in
+                                    transportVisibleRegion = context.region
+                                    if clustersPlacesByMapScale {
+                                        placeClusterVisibleRegion = context.region
                                     }
-                                    MapCompass()
-                                    MapScaleView()
                                 }
-                            }
-                            .safeAreaPadding(.top, currentTopSafeAreaInset)
-                            .overlay(alignment: .topTrailing) {
-                                if showsMapControls, let onResetCamera {
-                                    Button(action: onResetCamera) {
-                                        Image(systemName: "viewfinder")
-                                            .font(.system(size: 17, weight: .semibold))
-                                            .frame(width: 32, height: 32)
+                                .simultaneousGesture(
+                                    SpatialTapGesture(coordinateSpace: .local)
+                                        .onEnded { value in
+                                            guard let coordinate = mapProxy.convert(value.location, from: .local) else { return }
+                                            handleTransportLineTap(
+                                                at: coordinate,
+                                                mapSize: geometry.size,
+                                                annotationRevision: annotationTapRevision
+                                            )
+                                        }
+                                )
+                                // Handle taps on the map surface itself. Native map
+                                // controls are subviews and must keep their own taps
+                                // without forwarding them to the host's collapse action.
+                                .simultaneousGesture(
+                                    TapGesture().onEnded { onMapInteraction?(.tap) },
+                                    including: .gesture
+                                )
+                                .simultaneousGesture(DragGesture(minimumDistance: 8).onChanged { _ in onMapInteraction?(.pan) })
+                                .simultaneousGesture(MagnificationGesture().onChanged { _ in onMapInteraction?(.zoom) })
+                                .mapControls {
+                                    if showsMapControls {
+                                        if showsUserLocation {
+                                            MapUserLocationButton()
+                                        }
+                                        MapCompass()
+                                        MapScaleView()
                                     }
-                                    .mapLocationButtonStyle()
-                                    .buttonBorderShape(.circle)
-                                    .tint(.primary)
-                                    .accessibilityLabel("恢复视野")
-                                    // MapKit's location button (44pt) starts 16pt below
-                                    // the padded safe area; sit one 12pt control gap
-                                    // above it, matching the gap down to the compass.
-                                    .padding(.top, max(0, currentTopSafeAreaInset + 16 - 12 - 44))
-                                    .padding(.trailing, 16)
+                                }
+                                .safeAreaPadding(.top, currentTopSafeAreaInset)
+                                .overlay(alignment: .topTrailing) {
+                                    if showsMapControls, let onResetCamera {
+                                        Button(action: onResetCamera) {
+                                            Image(systemName: "viewfinder")
+                                                .font(.system(size: 17, weight: .semibold))
+                                                .frame(width: 32, height: 32)
+                                        }
+                                        .mapLocationButtonStyle()
+                                        .buttonBorderShape(.circle)
+                                        .tint(.primary)
+                                        .accessibilityLabel("恢复视野")
+                                        // MapKit's location button (44pt) starts 16pt below
+                                        // the padded safe area; sit one 12pt control gap
+                                        // above it, matching the gap down to the compass.
+                                        .padding(.top, max(0, currentTopSafeAreaInset + 16 - 12 - 44))
+                                        .padding(.trailing, 16)
+                                    }
                                 }
                             }
                         }
@@ -2248,6 +2324,7 @@ struct DFKMapView: View {
     }
 
     private func handleFootprintTap(for aggregated: AggregatedFootprint) {
+        annotationTapRevision &+= 1
         if aggregated.footprints.count > 1 {
             if let onAggregatedFootprintTap {
                 onAggregatedFootprintTap(aggregated)
@@ -2259,6 +2336,36 @@ struct DFKMapView: View {
 
         guard let footprint = aggregated.footprints.first else { return }
         onTimelineItemTap?(.footprint(footprint))
+    }
+
+    private func handleTransportLineTap(
+        at coordinate: CLLocationCoordinate2D,
+        mapSize: CGSize,
+        annotationRevision: Int
+    ) {
+        guard isInteractive,
+              let region = transportVisibleRegion,
+              onTimelineItemTap != nil,
+              mapSize.width > 0 else { return }
+        let routes = transportItems.map {
+            DFKTransportRouteHitTesting.Route(id: $0.id, coordinates: $0.coordinates)
+        }
+        guard !routes.isEmpty else { return }
+        Task { @MainActor in
+            let transportID = await Task.detached(priority: .userInitiated) {
+                DFKTransportRouteHitTesting.hitTransportID(
+                    at: coordinate,
+                    routes: routes,
+                    region: region,
+                    viewWidth: mapSize.width
+                )
+            }.value
+            guard !Task.isCancelled,
+                  annotationRevision == annotationTapRevision,
+                  let transportID,
+                  let transport = transportItems.first(where: { $0.id == transportID })?.transport else { return }
+            onTimelineItemTap?(.transport(transport))
+        }
     }
 
     @ViewBuilder
@@ -2413,6 +2520,7 @@ struct DFKMapView: View {
         if let onTimelineItemTap {
             transportIcon
                 .onTapGesture {
+                    annotationTapRevision &+= 1
                     onTimelineItemTap(.transport(transport))
                 }
         } else {
@@ -2945,6 +3053,14 @@ private struct StableInteractiveMapView: UIViewRepresentable {
         mapView.isPitchEnabled = true
         mapView.register(MKAnnotationView.self, forAnnotationViewWithReuseIdentifier: Coordinator.annotationReuseIdentifier)
 
+        let routeTapRecognizer = UITapGestureRecognizer(
+            target: context.coordinator,
+            action: #selector(Coordinator.didTapMapRoute(_:))
+        )
+        routeTapRecognizer.cancelsTouchesInView = false
+        routeTapRecognizer.delegate = context.coordinator
+        mapView.addGestureRecognizer(routeTapRecognizer)
+
         let controlsStack = UIStackView()
         controlsStack.tag = Self.controlsStackTag
         controlsStack.axis = .vertical
@@ -3008,7 +3124,9 @@ private struct StableInteractiveMapView: UIViewRepresentable {
         coordinator.lastContentToken = nil
         coordinator.selectedTimeAnnotation = nil
         coordinator.transportIconTask?.cancel()
+        coordinator.transportRouteHitTask?.cancel()
         coordinator.transportIconRoutes.removeAll()
+        coordinator.transportHitRoutes.removeAll()
 
         mapView.delegate = nil
 
@@ -3070,6 +3188,9 @@ private struct StableInteractiveMapView: UIViewRepresentable {
         context.coordinator.overlayStyles.removeAll()
         context.coordinator.footprintsByID = Dictionary(aggregatedFootprints.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         context.coordinator.transportsByID = Dictionary(transportItems.map { ($0.transport.id.uuidString, $0.transport) }, uniquingKeysWith: { first, _ in first })
+        context.coordinator.transportHitRoutes = transportItems.map {
+            DFKTransportRouteHitTesting.Route(id: $0.id, coordinates: $0.coordinates)
+        }
         context.coordinator.photosByID = Dictionary(photoAnnotations.map { ($0.asset.localIdentifier, $0.asset) }, uniquingKeysWith: { first, _ in first })
 
         let selectedTimeAnnotation = context.coordinator.selectedTimeAnnotation
@@ -3187,7 +3308,7 @@ private struct StableInteractiveMapView: UIViewRepresentable {
         mapView.addAnnotation(annotation)
     }
 
-    final class Coordinator: NSObject, MKMapViewDelegate {
+    final class Coordinator: NSObject, MKMapViewDelegate, UIGestureRecognizerDelegate {
         static let annotationReuseIdentifier = "StableInteractiveMapAnnotation"
         static let photoCenterOffset = CGPoint(x: 0, y: -17)
 
@@ -3206,6 +3327,8 @@ private struct StableInteractiveMapView: UIViewRepresentable {
         /// same-type icons are merged into one.
         var transportIconRoutes: [(annotation: MapImageAnnotation, coordinates: [CLLocationCoordinate2D], midpoint: CLLocationCoordinate2D, type: String)] = []
         var transportIconTask: Task<Void, Never>?
+        var transportHitRoutes: [DFKTransportRouteHitTesting.Route] = []
+        var transportRouteHitTask: Task<Void, Never>?
         private var imageCache: [String: UIImage] = [:]
 
         func cachedImage(key: String, make: () -> UIImage) -> UIImage {
@@ -3221,6 +3344,41 @@ private struct StableInteractiveMapView: UIViewRepresentable {
 
         @objc func didTapLocationButton() {
             parent.onUserLocationTap?()
+        }
+
+        @objc func didTapMapRoute(_ gesture: UITapGestureRecognizer) {
+            guard gesture.state == .ended, let mapView = gesture.view as? MKMapView else { return }
+            transportRouteHitTask?.cancel()
+            let point = gesture.location(in: mapView)
+            let coordinate = mapView.convert(point, toCoordinateFrom: mapView)
+            let routes = transportHitRoutes
+            let region = mapView.region
+            let viewWidth = mapView.bounds.width
+            guard !routes.isEmpty, viewWidth > 0 else { return }
+            transportRouteHitTask = Task { @MainActor [weak self] in
+                let transportID = await Task.detached(priority: .userInitiated) {
+                    DFKTransportRouteHitTesting.hitTransportID(
+                        at: coordinate,
+                        routes: routes,
+                        region: region,
+                        viewWidth: viewWidth
+                    )
+                }.value
+                guard !Task.isCancelled,
+                      let self,
+                      let transportID,
+                      let transport = self.transportsByID[transportID.uuidString] else { return }
+                self.parent.onTransportTap(transport)
+            }
+        }
+
+        func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+            var view: UIView? = touch.view
+            while let current = view {
+                if current is MKAnnotationView || current is UIControl { return false }
+                view = current.superview
+            }
+            return true
         }
 
 
@@ -3498,11 +3656,13 @@ private final class MapImageAnnotation: NSObject, MKAnnotation {
     }
 }
 
-/// Map annotation stacking shared by every map: transport < footprint < photo.
+/// Map annotation stacking shared by every map.
 enum MapAnnotationLayer {
+    static let routeEndpoint: CGFloat = -10
     static let transport: CGFloat = 0
     static let footprint: CGFloat = 10
     static let photo: CGFloat = 20
+    static let animatedTransport: CGFloat = 30
 }
 
 /// SwiftUI `Annotation` has no z-order control and MapKit stacks annotation

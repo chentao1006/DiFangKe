@@ -127,6 +127,11 @@ class AppConfig {
     var transportRouteCompletionRequestInterval: Double { double(forKey: "TRANSPORT_ROUTE_COMPLETION_REQUEST_INTERVAL") }
     var transportRouteCompletionFailureLimit: Int { int(forKey: "TRANSPORT_ROUTE_COMPLETION_FAILURE_LIMIT") }
     var transportRouteCompletionMemoryLimit: Int { int(forKey: "TRANSPORT_ROUTE_COMPLETION_MEMORY_LIMIT") }
+    var transportLearnedRouteEndpointTolerance: Double { double(forKey: "TRANSPORT_LEARNED_ROUTE_ENDPOINT_TOLERANCE") }
+    var transportRouteAnimationTimeScale: Double { double(forKey: "TRANSPORT_ROUTE_ANIMATION_TIME_SCALE") }
+    var transportRouteAnimationMinDuration: Double { double(forKey: "TRANSPORT_ROUTE_ANIMATION_MIN_DURATION") }
+    var transportRouteAnimationMaxDuration: Double { double(forKey: "TRANSPORT_ROUTE_ANIMATION_MAX_DURATION") }
+    var transportRouteAnimationEndPause: Double { double(forKey: "TRANSPORT_ROUTE_ANIMATION_END_PAUSE") }
 
     var dailySummaryPreparationLeadTime: TimeInterval {
         double(forKey: "DAILY_SUMMARY_PREPARATION_LEAD_TIME")

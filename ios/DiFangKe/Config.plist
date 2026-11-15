@@ -32,6 +32,18 @@
 	<integer>3</integer>
 	<key>TRANSPORT_ROUTE_COMPLETION_MEMORY_LIMIT</key>
 	<integer>128</integer>
+	<!-- 常走补充路线与新缺口起终点的最大匹配偏差（米） -->
+	<key>TRANSPORT_LEARNED_ROUTE_ENDPOINT_TOLERANCE</key>
+	<real>150</real>
+	<!-- 交通详情路线动画：真实行程时间压缩倍数，以及单次循环时长范围（秒） -->
+	<key>TRANSPORT_ROUTE_ANIMATION_TIME_SCALE</key>
+	<real>60</real>
+	<key>TRANSPORT_ROUTE_ANIMATION_MIN_DURATION</key>
+	<real>5</real>
+	<key>TRANSPORT_ROUTE_ANIMATION_MAX_DURATION</key>
+	<real>18</real>
+	<key>TRANSPORT_ROUTE_ANIMATION_END_PAUSE</key>
+	<real>1.2</real>
 	<key>AI_LIMIT_PER_MINUTE</key>
 	<integer>1</integer>
 	<key>AI_LIMIT_PER_HOUR</key>

@@ -24,6 +24,10 @@ enum TransportRouteCompletion {
         struct Coordinate: Codable {
             let latitude: Double
             let longitude: Double
+
+            var coordinate: CLLocationCoordinate2D {
+                CLLocationCoordinate2D(latitude: latitude, longitude: longitude)
+            }
         }
         let version: Int
         let key: String
@@ -49,6 +53,151 @@ enum TransportRouteCompletion {
         }
     }
 
+    struct ManualRouteSaveResult: Sendable {
+        let routeSaved: Bool
+        let learnedRouteSaved: Bool
+    }
+
+    private struct LearnedRouteFile: Codable {
+        let version: Int
+        var routes: [LearnedRoute]
+    }
+
+    private struct LearnedRoute: Codable {
+        let id: UUID
+        let typeRaw: String
+        let start: CachedRoute.Coordinate
+        let end: CachedRoute.Coordinate
+        let updatedAt: Date
+        let coordinates: [CachedRoute.Coordinate]
+    }
+
+    private final class LearnedRouteStore: @unchecked Sendable {
+        private let lock = NSLock()
+        private var loaded = false
+        private var routes: [LearnedRoute] = []
+
+        func coordinates(for gap: Gap) -> [CLLocationCoordinate2D]? {
+            lock.lock()
+            defer { lock.unlock() }
+            loadIfNeeded()
+            let tolerance = AppConfig.shared.transportLearnedRouteEndpointTolerance
+            return routes
+                .filter { route in
+                    route.typeRaw == gap.type.rawValue &&
+                        TransportRouteCompletion.meters(route.start.coordinate, gap.start) <= tolerance &&
+                        TransportRouteCompletion.meters(route.end.coordinate, gap.end) <= tolerance
+                }
+                .min { lhs, rhs in
+                    endpointDistance(lhs, gap: gap) < endpointDistance(rhs, gap: gap)
+                }
+                .map { anchored($0.coordinates.map(\.coordinate), to: gap) }
+        }
+
+        func save(_ coordinates: [CLLocationCoordinate2D], for gap: Gap) -> Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            loadIfNeeded()
+            let previousRoutes = routes
+            let tolerance = AppConfig.shared.transportLearnedRouteEndpointTolerance
+            routes.removeAll { route in
+                route.typeRaw == gap.type.rawValue &&
+                    TransportRouteCompletion.meters(route.start.coordinate, gap.start) <= tolerance &&
+                    TransportRouteCompletion.meters(route.end.coordinate, gap.end) <= tolerance
+            }
+            routes.append(LearnedRoute(
+                id: UUID(), typeRaw: gap.type.rawValue,
+                start: .init(latitude: gap.start.latitude, longitude: gap.start.longitude),
+                end: .init(latitude: gap.end.latitude, longitude: gap.end.longitude),
+                updatedAt: Date(),
+                coordinates: coordinates.map { .init(latitude: $0.latitude, longitude: $0.longitude) }
+            ))
+            guard persist() else {
+                routes = previousRoutes
+                return false
+            }
+            return true
+        }
+
+        func removeRoute(matching gap: Gap) -> Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            loadIfNeeded()
+            let previousRoutes = routes
+            let tolerance = AppConfig.shared.transportLearnedRouteEndpointTolerance
+            let originalCount = routes.count
+            routes.removeAll { route in
+                route.typeRaw == gap.type.rawValue &&
+                    TransportRouteCompletion.meters(route.start.coordinate, gap.start) <= tolerance &&
+                    TransportRouteCompletion.meters(route.end.coordinate, gap.end) <= tolerance
+            }
+            guard routes.count != originalCount else { return true }
+            guard persist() else {
+                routes = previousRoutes
+                return false
+            }
+            return true
+        }
+
+        private func endpointDistance(_ route: LearnedRoute, gap: Gap) -> Double {
+            TransportRouteCompletion.meters(route.start.coordinate, gap.start) +
+                TransportRouteCompletion.meters(route.end.coordinate, gap.end)
+        }
+
+        private func anchored(
+            _ coordinates: [CLLocationCoordinate2D],
+            to gap: Gap
+        ) -> [CLLocationCoordinate2D] {
+            var result = [gap.start]
+            for coordinate in coordinates {
+                if result.last?.latitude != coordinate.latitude || result.last?.longitude != coordinate.longitude {
+                    result.append(coordinate)
+                }
+            }
+            if result.last?.latitude != gap.end.latitude || result.last?.longitude != gap.end.longitude {
+                result.append(gap.end)
+            }
+            return result
+        }
+
+        private func loadIfNeeded() {
+            guard !loaded else { return }
+            loaded = true
+            guard let data = try? Data(contentsOf: Self.fileURL),
+                  let file = try? JSONDecoder().decode(LearnedRouteFile.self, from: data),
+                  file.version == 1 else { return }
+            routes = file.routes.filter { route in
+                route.coordinates.count >= 2 && route.coordinates.allSatisfy { coordinate in
+                    TransportRouteCompletion.valid(coordinate.coordinate)
+                }
+            }
+        }
+
+        private func persist() -> Bool {
+            do {
+                try FileManager.default.createDirectory(
+                    at: Self.fileURL.deletingLastPathComponent(),
+                    withIntermediateDirectories: true
+                )
+                try JSONEncoder().encode(LearnedRouteFile(version: 1, routes: routes))
+                    .write(to: Self.fileURL, options: .atomic)
+                return true
+            } catch {
+                print("[TransportRouteCompletion] Could not save learned routes: \(error.localizedDescription)")
+                return false
+            }
+        }
+
+        private static let fileURL = FileManager.default.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        )[0]
+            .appendingPathComponent("TransportRoutes", isDirectory: true)
+            .appendingPathComponent("learned-v1.json")
+    }
+
+    private static let learnedRoutes = LearnedRouteStore()
+
     private final class MemoryCache: @unchecked Sendable {
         private let lock = NSLock()
         private var entries: [String: CachedRoute] = [:]
@@ -67,6 +216,12 @@ enum TransportRouteCompletion {
             }
             entries[entry.key] = entry
         }
+
+        func removeValue(for key: String) {
+            lock.lock()
+            defer { lock.unlock() }
+            entries[key] = nil
+        }
     }
 
     private static let memory = MemoryCache()
@@ -76,13 +231,103 @@ enum TransportRouteCompletion {
     static func cachedSegments(for transport: Transport) -> [TransportLineSegment] {
         var replacements: [Int: [CLLocationCoordinate2D]] = [:]
         for gap in gaps(for: transport) {
-            if let entry = cached(gap), !entry.coordinates.isEmpty {
-                replacements[gap.index] = entry.coordinates.map {
-                    CLLocationCoordinate2D(latitude: $0.latitude, longitude: $0.longitude)
-                }
+            if let coordinates = resolvedCoordinates(for: gap) {
+                replacements[gap.index] = coordinates
             }
         }
         return transport.lineSegments(replacingInferredGaps: replacements)
+    }
+
+    static func hasManualRoute(for gap: Gap) -> Bool {
+        cached(gap)?.source == "user-waypoint"
+    }
+
+    static func hasLearnedRoute(for gap: Gap) -> Bool {
+        learnedRoutes.coordinates(for: gap) != nil
+    }
+
+    static func cachedRouteCoordinates(for gap: Gap) -> [CLLocationCoordinate2D]? {
+        resolvedCoordinates(for: gap)
+    }
+
+    /// Reuses the same validation and cache as background completion when the
+    /// correction sheet has already loaded route candidates. This closes the
+    /// gap where the sheet can draw a recognized road shape while the parent
+    /// map still has only its straight fallback.
+    static func cacheBestAutomaticRoute(
+        from candidates: [TripPlannedRoute],
+        for gap: Gap
+    ) -> Bool {
+        guard cachedRouteCoordinates(for: gap) == nil,
+              let coordinates = bestCoordinates(candidates, for: gap) else { return false }
+        return store(coordinates, for: gap)
+    }
+
+    private static func resolvedCoordinates(for gap: Gap) -> [CLLocationCoordinate2D]? {
+        let entry = cached(gap)
+        if entry?.source == "user-waypoint", let entry, !entry.coordinates.isEmpty {
+            return entry.coordinates.map(\.coordinate)
+        }
+        if let learned = learnedRoutes.coordinates(for: gap) { return learned }
+        guard let entry, !entry.coordinates.isEmpty else { return nil }
+        return entry.coordinates.map(\.coordinate)
+    }
+
+    /// User-authored geometry remains display-only. It deliberately shares the
+    /// inferred-gap cache key so edits follow the exact record, mode and sample
+    /// endpoints without changing the recorded GPS route or its metrics.
+    static func saveManualRoute(
+        _ coordinates: [CLLocationCoordinate2D],
+        for gap: Gap,
+        learnsForFuture: Bool
+    ) -> ManualRouteSaveResult {
+        guard coordinates.count >= 2, coordinates.allSatisfy(valid) else {
+            return ManualRouteSaveResult(routeSaved: false, learnedRouteSaved: !learnsForFuture)
+        }
+        var anchored = [gap.start]
+        for coordinate in coordinates {
+            if anchored.last?.latitude != coordinate.latitude || anchored.last?.longitude != coordinate.longitude {
+                anchored.append(coordinate)
+            }
+        }
+        if anchored.last?.latitude != gap.end.latitude || anchored.last?.longitude != gap.end.longitude {
+            anchored.append(gap.end)
+        }
+        let entry = CachedRoute(
+            version: 1, key: gap.key, recordID: gap.recordID,
+            typeRaw: gap.type.rawValue, source: "user-waypoint", coordinateSystem: "GCJ02",
+            fetchedAt: Date(), matchingVersion: 4, failureCount: 0, permanentlyFailed: false,
+            coordinates: anchored.map { .init(latitude: $0.latitude, longitude: $0.longitude) }
+        )
+        let routeSaved = persist(entry, updatesRevision: true)
+        let learnedRouteSaved: Bool
+        if routeSaved {
+            learnedRouteSaved = learnsForFuture
+                ? learnedRoutes.save(anchored, for: gap)
+                : learnedRoutes.removeRoute(matching: gap)
+        } else {
+            learnedRouteSaved = !learnsForFuture
+        }
+        return ManualRouteSaveResult(routeSaved: routeSaved, learnedRouteSaved: learnedRouteSaved)
+    }
+
+    static func resetManualRoute(for gap: Gap) -> Bool {
+        let hasManual = hasManualRoute(for: gap)
+        let hasLearned = hasLearnedRoute(for: gap)
+        guard hasManual || hasLearned else { return false }
+        memory.removeValue(for: gap.key)
+        do {
+            let url = cacheURL(for: gap)
+            if hasManual, FileManager.default.fileExists(atPath: url.path) {
+                try FileManager.default.removeItem(at: url)
+            }
+            guard !hasLearned || learnedRoutes.removeRoute(matching: gap) else { return false }
+            updateRevision()
+            return true
+        } catch {
+            print("[TransportRouteCompletion] Could not reset manual route: \(error.localizedDescription)")
+            return false
+        }
     }
 
     static func transport(
@@ -149,6 +394,7 @@ enum TransportRouteCompletion {
             return transports.flatMap { Self.gaps(for: $0) }
                 .filter { gap in
                     guard seen.insert(gap.key).inserted else { return false }
+                    guard learnedRoutes.coordinates(for: gap) == nil else { return false }
                     guard let entry = cached(gap) else { return true }
                     return !entry.hasStoppedRetrying && entry.coordinates.isEmpty &&
                         (activelyRequested || entry.matchingVersion != 4 ||
@@ -326,7 +572,7 @@ enum TransportRouteCompletion {
               entry.version == 1, entry.key == gap.key, entry.recordID == gap.recordID,
               entry.typeRaw == gap.type.rawValue, entry.coordinateSystem == "GCJ02",
               entry.hasStoppedRetrying || gap.type != .train || entry.matchingVersion == 4,
-              entry.coordinates.isEmpty || (entry.coordinates.count > 2 && entry.coordinates.allSatisfy({
+              entry.coordinates.isEmpty || ((entry.source == "user-waypoint" ? entry.coordinates.count >= 2 : entry.coordinates.count > 2) && entry.coordinates.allSatisfy({
                   valid(.init(latitude: $0.latitude, longitude: $0.longitude))
               })) else { return nil }
         memory.store(entry)
@@ -334,6 +580,9 @@ enum TransportRouteCompletion {
     }
 
     private static func store(_ coordinates: [CLLocationCoordinate2D], for gap: Gap) -> Bool {
+        // A request that started before the user saved a correction must not
+        // overwrite that correction when its network response arrives later.
+        if cached(gap)?.source == "user-waypoint" || learnedRoutes.coordinates(for: gap) != nil { return false }
         let failureLimit = max(1, AppConfig.shared.transportRouteCompletionFailureLimit)
         let failures = coordinates.isEmpty
             ? min(cached(gap)?.recordedFailureCount ?? 0, failureLimit) + 1 : 0
@@ -345,15 +594,16 @@ enum TransportRouteCompletion {
             failureCount: failures, permanentlyFailed: failures >= failureLimit,
             coordinates: coordinates.map { .init(latitude: $0.latitude, longitude: $0.longitude) }
         )
-        memory.store(entry)
+        return persist(entry, updatesRevision: !coordinates.isEmpty)
+    }
+
+    private static func persist(_ entry: CachedRoute, updatesRevision: Bool) -> Bool {
         do {
-            let url = cacheURL(for: gap)
+            let url = cacheURL(recordID: entry.recordID, key: entry.key)
             try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
             try JSONEncoder().encode(entry).write(to: url, options: .atomic)
             memory.store(entry)
-            if !coordinates.isEmpty {
-                UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: "transportInferredRoutesRevision")
-            }
+            if updatesRevision { updateRevision() }
             return true
         } catch {
             print("[TransportRouteCompletion] Could not save display route: \(error.localizedDescription)")
@@ -361,11 +611,19 @@ enum TransportRouteCompletion {
         }
     }
 
+    private static func updateRevision() {
+        UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: "transportInferredRoutesRevision")
+    }
+
     private static func cacheURL(for gap: Gap) -> URL {
+        cacheURL(recordID: gap.recordID, key: gap.key)
+    }
+
+    private static func cacheURL(recordID: UUID, key: String) -> URL {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("TransportRoutes/v1", isDirectory: true)
-            .appendingPathComponent(gap.recordID.uuidString, isDirectory: true)
-            .appendingPathComponent("\(gap.key).json")
+            .appendingPathComponent(recordID.uuidString, isDirectory: true)
+            .appendingPathComponent("\(key).json")
     }
 
     private static func valid(_ coordinate: CLLocationCoordinate2D) -> Bool {

@@ -4,6 +4,390 @@ import MapKit
 import SwiftData
 import Aptabase
 
+private struct TransportRouteAnimationFrame: @unchecked Sendable {
+    let coordinate: CLLocationCoordinate2D
+    let travelsWest: Bool
+    let timeText: String
+}
+
+private struct TransportRouteAnimation: @unchecked Sendable {
+    let frames: [TransportRouteAnimationFrame]
+    let frameInterval: TimeInterval
+    let endPause: TimeInterval
+
+    static let empty = TransportRouteAnimation(frames: [], frameInterval: 0, endPause: 0)
+
+    nonisolated static func make(
+        segments: [TransportLineSegment],
+        pathPoints: [TransportPathPoint],
+        averageSpeed: Double,
+        startTime: Date,
+        endTime: Date
+    ) -> TransportRouteAnimation {
+        var coordinates: [CLLocationCoordinate2D] = []
+        for coordinate in segments.flatMap(\.coordinates) where CLLocationCoordinate2DIsValid(coordinate) {
+            if coordinates.last?.latitude != coordinate.latitude || coordinates.last?.longitude != coordinate.longitude {
+                coordinates.append(coordinate)
+            }
+        }
+        guard coordinates.count >= 2 else { return .empty }
+
+        var cumulativeDistances: [Double] = [0]
+        var totalDistance = 0.0
+        for (start, end) in zip(coordinates, coordinates.dropFirst()) {
+            totalDistance += CLLocation(latitude: start.latitude, longitude: start.longitude)
+                .distance(from: CLLocation(latitude: end.latitude, longitude: end.longitude))
+            cumulativeDistances.append(totalDistance)
+        }
+        guard totalDistance.isFinite, totalDistance > 0 else { return .empty }
+
+        let recordedDuration = endTime.timeIntervalSince(startTime)
+        let fallbackDuration = averageSpeed.isFinite && averageSpeed > 0
+            ? totalDistance / averageSpeed
+            : 0
+        let timelineDuration = recordedDuration > 0 ? recordedDuration : fallbackDuration
+        guard timelineDuration.isFinite, timelineDuration > 0 else { return .empty }
+        let config = AppConfig.shared
+        let timeScale = max(config.transportRouteAnimationTimeScale, 1)
+        let minimumDuration = max(config.transportRouteAnimationMinDuration, 1)
+        let maximumDuration = max(config.transportRouteAnimationMaxDuration, minimumDuration)
+        let loopDuration = min(max(timelineDuration / timeScale, minimumDuration), maximumDuration)
+        let framesPerSecond = 15.0
+        let frameCount = max(2, Int((loopDuration * framesPerSecond).rounded()))
+        var frames: [TransportRouteAnimationFrame] = []
+        frames.reserveCapacity(frameCount)
+        var segmentIndex = 0
+        var anchorIndex = 0
+        var travelsWest = false
+        let anchors = timedAnchors(
+            pathPoints: pathPoints,
+            coordinates: coordinates,
+            cumulativeDistances: cumulativeDistances,
+            startTime: startTime,
+            duration: timelineDuration,
+            totalDistance: totalDistance
+        )
+        let timeFormatter = DateFormatter()
+        timeFormatter.locale = .current
+        timeFormatter.timeZone = .current
+        timeFormatter.dateFormat = "HH:mm"
+
+        for frameIndex in 0..<frameCount {
+            let fraction = Double(frameIndex) / Double(frameCount - 1)
+            let targetElapsed = timelineDuration * fraction
+            while anchorIndex + 1 < anchors.count - 1,
+                  anchors[anchorIndex + 1].elapsed < targetElapsed {
+                anchorIndex += 1
+            }
+            let leadingAnchor = anchors[anchorIndex]
+            let trailingAnchor = anchors[anchorIndex + 1]
+            let anchorDuration = trailingAnchor.elapsed - leadingAnchor.elapsed
+            let anchorFraction = anchorDuration > 0
+                ? (targetElapsed - leadingAnchor.elapsed) / anchorDuration
+                : 0
+            let targetDistance = leadingAnchor.distance +
+                (trailingAnchor.distance - leadingAnchor.distance) * anchorFraction
+            while segmentIndex + 1 < cumulativeDistances.count - 1,
+                  cumulativeDistances[segmentIndex + 1] < targetDistance {
+                segmentIndex += 1
+            }
+            let start = coordinates[segmentIndex]
+            let end = coordinates[segmentIndex + 1]
+            let segmentDistance = cumulativeDistances[segmentIndex + 1] - cumulativeDistances[segmentIndex]
+            let segmentFraction = segmentDistance > 0
+                ? (targetDistance - cumulativeDistances[segmentIndex]) / segmentDistance
+                : 0
+            var longitudeDelta = end.longitude - start.longitude
+            if longitudeDelta > 180 { longitudeDelta -= 360 }
+            if longitudeDelta < -180 { longitudeDelta += 360 }
+            if longitudeDelta != 0 { travelsWest = longitudeDelta < 0 }
+            frames.append(TransportRouteAnimationFrame(
+                coordinate: CLLocationCoordinate2D(
+                    latitude: start.latitude + (end.latitude - start.latitude) * segmentFraction,
+                    longitude: start.longitude + longitudeDelta * segmentFraction
+                ),
+                travelsWest: travelsWest,
+                timeText: timeFormatter.string(
+                    from: startTime.addingTimeInterval(max(recordedDuration, 0) * fraction)
+                )
+            ))
+        }
+        return TransportRouteAnimation(
+            frames: frames,
+            frameInterval: loopDuration / Double(frameCount),
+            endPause: max(config.transportRouteAnimationEndPause, 0)
+        )
+    }
+
+    nonisolated private static func timedAnchors(
+        pathPoints: [TransportPathPoint],
+        coordinates: [CLLocationCoordinate2D],
+        cumulativeDistances: [Double],
+        startTime: Date,
+        duration: TimeInterval,
+        totalDistance: Double
+    ) -> [(elapsed: TimeInterval, distance: Double)] {
+        var anchors: [(elapsed: TimeInterval, distance: Double)] = [(0, 0)]
+        var lowerCoordinateIndex = 0
+
+        for point in pathPoints {
+            guard let timestamp = point.timestamp else { continue }
+            let elapsed = timestamp.timeIntervalSince(startTime)
+            guard elapsed > anchors.last!.elapsed, elapsed < duration else { continue }
+            let target = MKMapPoint(point.coordinate)
+            var nearestIndex = lowerCoordinateIndex
+            var nearestSquaredDistance = Double.greatestFiniteMagnitude
+            for index in lowerCoordinateIndex..<coordinates.count {
+                let candidate = MKMapPoint(coordinates[index])
+                let dx = candidate.x - target.x
+                let dy = candidate.y - target.y
+                let squaredDistance = dx * dx + dy * dy
+                if squaredDistance < nearestSquaredDistance {
+                    nearestSquaredDistance = squaredDistance
+                    nearestIndex = index
+                }
+            }
+            lowerCoordinateIndex = nearestIndex
+            anchors.append((elapsed, cumulativeDistances[nearestIndex]))
+        }
+        anchors.append((duration, totalDistance))
+        return anchors
+    }
+}
+
+private enum RouteMapNativeGestureKind: Hashable {
+    case pan
+    case zoom
+    case rotate
+}
+
+/// Observes the gesture recognizers already owned by the SwiftUI map's
+/// underlying MKMapView. Adding targets does not participate in recognition,
+/// so native pan/zoom/rotation keep their original precedence and behavior.
+private struct RouteMapNativeGestureObserver: UIViewRepresentable {
+    let onInteractionChanged: (RouteMapNativeGestureKind, Bool) -> Void
+    let onTouchChanged: (Bool) -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(
+            onInteractionChanged: onInteractionChanged,
+            onTouchChanged: onTouchChanged
+        )
+    }
+
+    func makeUIView(context: Context) -> ProbeView {
+        let view = ProbeView()
+        view.isUserInteractionEnabled = false
+        view.coordinator = context.coordinator
+        return view
+    }
+
+    func updateUIView(_ view: ProbeView, context: Context) {
+        context.coordinator.onInteractionChanged = onInteractionChanged
+        context.coordinator.onTouchChanged = onTouchChanged
+        context.coordinator.installIfNeeded(from: view)
+    }
+
+    static func dismantleUIView(_ view: ProbeView, coordinator: Coordinator) {
+        coordinator.uninstall()
+    }
+
+    final class ProbeView: UIView {
+        weak var coordinator: Coordinator?
+
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            coordinator?.installIfNeeded(from: self)
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.coordinator?.installIfNeeded(from: self)
+            }
+        }
+
+        override func layoutSubviews() {
+            super.layoutSubviews()
+            coordinator?.installIfNeeded(from: self)
+        }
+    }
+
+    final class Coordinator: NSObject {
+        var onInteractionChanged: (RouteMapNativeGestureKind, Bool) -> Void
+        var onTouchChanged: (Bool) -> Void
+        private weak var installedMapView: MKMapView?
+        private var installedRecognizers: [UIGestureRecognizer] = []
+        private var activeRecognizerKinds: [ObjectIdentifier: RouteMapNativeGestureKind] = [:]
+        private var touchObserver: TouchObserverGestureRecognizer?
+
+        init(
+            onInteractionChanged: @escaping (RouteMapNativeGestureKind, Bool) -> Void,
+            onTouchChanged: @escaping (Bool) -> Void
+        ) {
+            self.onInteractionChanged = onInteractionChanged
+            self.onTouchChanged = onTouchChanged
+        }
+
+        func installIfNeeded(from probe: UIView) {
+            guard installedMapView == nil else { return }
+            guard let mapView = Self.nearestMapView(to: probe) else { return }
+            uninstall()
+            installedMapView = mapView
+            let touchObserver = TouchObserverGestureRecognizer { [weak self] isTouching in
+                self?.onTouchChanged(isTouching)
+            }
+            touchObserver.cancelsTouchesInView = false
+            touchObserver.delaysTouchesBegan = false
+            touchObserver.delaysTouchesEnded = false
+            mapView.addGestureRecognizer(touchObserver)
+            self.touchObserver = touchObserver
+            let recognizers = Self.mapGestureRecognizers(in: mapView)
+            for recognizer in recognizers where
+                recognizer is UIPinchGestureRecognizer ||
+                recognizer is UIRotationGestureRecognizer ||
+                recognizer is UIPanGestureRecognizer {
+                recognizer.addTarget(self, action: #selector(handleMapGesture(_:)))
+                installedRecognizers.append(recognizer)
+            }
+        }
+
+        func uninstall() {
+            if let touchObserver {
+                touchObserver.view?.removeGestureRecognizer(touchObserver)
+            }
+            touchObserver = nil
+            for recognizer in installedRecognizers {
+                recognizer.removeTarget(self, action: #selector(handleMapGesture(_:)))
+            }
+            installedRecognizers.removeAll()
+            activeRecognizerKinds.removeAll()
+            installedMapView = nil
+        }
+
+        final class TouchObserverGestureRecognizer: UIGestureRecognizer {
+            private var activeTouches: Set<ObjectIdentifier> = []
+            private let onTouchChanged: (Bool) -> Void
+
+            init(onTouchChanged: @escaping (Bool) -> Void) {
+                self.onTouchChanged = onTouchChanged
+                super.init(target: nil, action: nil)
+            }
+
+            override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent) {
+                let wasEmpty = activeTouches.isEmpty
+                activeTouches.formUnion(touches.map { ObjectIdentifier($0) })
+                if wasEmpty, !activeTouches.isEmpty {
+                    onTouchChanged(true)
+                }
+            }
+
+            override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent) {
+                finish(touches)
+            }
+
+            override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent) {
+                finish(touches)
+            }
+
+            override func reset() {
+                if !activeTouches.isEmpty {
+                    activeTouches.removeAll()
+                    onTouchChanged(false)
+                }
+                super.reset()
+            }
+
+            override func canPrevent(_ preventedGestureRecognizer: UIGestureRecognizer) -> Bool {
+                false
+            }
+
+            override func canBePrevented(by preventingGestureRecognizer: UIGestureRecognizer) -> Bool {
+                false
+            }
+
+            private func finish(_ touches: Set<UITouch>) {
+                activeTouches.subtract(touches.map { ObjectIdentifier($0) })
+                if activeTouches.isEmpty {
+                    onTouchChanged(false)
+                    state = .failed
+                }
+            }
+        }
+
+        @objc private func handleMapGesture(_ recognizer: UIGestureRecognizer) {
+            let kind: RouteMapNativeGestureKind
+            if recognizer is UIPinchGestureRecognizer {
+                kind = .zoom
+            } else if recognizer is UIRotationGestureRecognizer {
+                kind = .rotate
+            } else {
+                kind = .pan
+            }
+            switch recognizer.state {
+            case .began:
+                activeRecognizerKinds[ObjectIdentifier(recognizer)] = kind
+                onInteractionChanged(kind, true)
+            case .changed:
+                let identifier = ObjectIdentifier(recognizer)
+                if activeRecognizerKinds[identifier] == nil {
+                    activeRecognizerKinds[identifier] = kind
+                    onInteractionChanged(kind, true)
+                }
+            case .ended, .cancelled, .failed:
+                activeRecognizerKinds.removeValue(forKey: ObjectIdentifier(recognizer))
+                let remainsActive = activeRecognizerKinds.values.contains(kind)
+                onInteractionChanged(kind, remainsActive)
+            default:
+                break
+            }
+        }
+
+        private static func nearestMapView(to probe: UIView) -> MKMapView? {
+            var ancestor = probe.superview
+            while let container = ancestor {
+                let maps = mapViews(in: container)
+                if !maps.isEmpty {
+                    guard let window = probe.window else { return maps.first }
+                    let probeFrame = probe.convert(probe.bounds, to: window)
+                    return maps.max { lhs, rhs in
+                        let lhsFrame = lhs.convert(lhs.bounds, to: window)
+                        let rhsFrame = rhs.convert(rhs.bounds, to: window)
+                        let lhsArea = lhsFrame.intersection(probeFrame).area
+                        let rhsArea = rhsFrame.intersection(probeFrame).area
+                        return lhsArea < rhsArea
+                    }
+                }
+                ancestor = container.superview
+            }
+            return nil
+        }
+
+        private static func mapViews(in view: UIView) -> [MKMapView] {
+            var result: [MKMapView] = []
+            if let mapView = view as? MKMapView {
+                result.append(mapView)
+            }
+            for subview in view.subviews {
+                result.append(contentsOf: mapViews(in: subview))
+            }
+            return result
+        }
+
+        private static func mapGestureRecognizers(in view: UIView) -> [UIGestureRecognizer] {
+            var result = view.gestureRecognizers ?? []
+            for subview in view.subviews {
+                result.append(contentsOf: mapGestureRecognizers(in: subview))
+            }
+            return result
+        }
+    }
+}
+
+private extension CGRect {
+    var area: CGFloat {
+        guard !isNull, !isInfinite else { return 0 }
+        return max(width, 0) * max(height, 0)
+    }
+}
+
 // MARK: - TransportModalView
 struct TransportModalView: View {
     let transport: Transport
@@ -12,6 +396,7 @@ struct TransportModalView: View {
     
     @Environment(\.dismiss) private var dismiss
     @Environment(\.modelContext) private var modelContext
+    @Environment(\.accessibilityReduceMotion) private var accessibilityReduceMotion
     
     @Query(sort: \Place.name) private var allPlaces: [Place]
     @State private var position: MapCameraPosition = .automatic
@@ -27,7 +412,54 @@ struct TransportModalView: View {
     @State private var localEndTime: Date? = nil
     @State private var refreshedTransport: Transport? = nil
     @State private var displayedRouteSegments: [TransportLineSegment] = []
+    @State private var routeAnimation = TransportRouteAnimation.empty
+    @State private var routeAnimationFrameIndex = 0
+    @State private var routeAnimationRevision = 0
+    @State private var isRouteAnimationPaused = false
+    @State private var routeAnimationWasPlayingBeforeScrub = false
+    @State private var routeAnimationWasPlayingBeforeMapTouch = false
+    @State private var followsRouteAnimation = false
+    @State private var routeCameraViewParameters: RouteCameraViewParameters?
+    @State private var isDraggingRouteMap = false
+    @State private var isZoomingRouteMap = false
+    @State private var isRotatingRouteMap = false
+    @State private var isTouchingRouteMap = false
+    @State private var routeMapNeedsRecenterAfterInteraction = false
+    @State private var isRouteMapRecentering = false
+    @State private var editableRouteGaps: [TransportRouteCompletion.Gap] = []
+    @State private var routeTapTargets: [RouteTapTarget] = []
     @State private var inferredRoutesRevision = TransportRouteCompletion.revision
+    @State private var showingRouteCorrection = false
+    @State private var selectedRouteGapIndex = 0
+    @State private var visibleRouteRegion: MKCoordinateRegion?
+
+    private struct RouteTapTarget: @unchecked Sendable {
+        let gapIndex: Int
+        let coordinates: [CLLocationCoordinate2D]
+    }
+
+    private struct RouteCameraViewParameters {
+        let distance: CLLocationDistance
+        let heading: CLLocationDirection
+        let pitch: CGFloat
+
+        func distanceMeaningfullyDiffers(from other: RouteCameraViewParameters) -> Bool {
+            abs(distance - other.distance) > 0.5
+        }
+
+        func orientationMeaningfullyDiffers(from other: RouteCameraViewParameters) -> Bool {
+            let rawHeadingDifference = abs(heading - other.heading)
+                .truncatingRemainder(dividingBy: 360)
+            let headingDifference = min(rawHeadingDifference, 360 - rawHeadingDifference)
+            return headingDifference > 0.01 ||
+                abs(pitch - other.pitch) > 0.01
+        }
+
+        func meaningfullyDiffers(from other: RouteCameraViewParameters) -> Bool {
+            distanceMeaningfullyDiffers(from: other) ||
+                orientationMeaningfullyDiffers(from: other)
+        }
+    }
 
     private struct RouteDisplayKey: Hashable {
         let geometry: ObjectIdentifier
@@ -65,6 +497,170 @@ struct TransportModalView: View {
         localManualType ?? displayedTransport.currentType
     }
 
+    private var currentRouteAnimationFrame: TransportRouteAnimationFrame? {
+        guard routeAnimation.frames.indices.contains(routeAnimationFrameIndex) else { return nil }
+        return routeAnimation.frames[routeAnimationFrameIndex]
+    }
+
+    private var routeAnimationProgress: Binding<Double> {
+        Binding(
+            get: {
+                guard routeAnimation.frames.count >= 2 else { return 0 }
+                return Double(routeAnimationFrameIndex) / Double(routeAnimation.frames.count - 1)
+            },
+            set: { progress in
+                guard routeAnimation.frames.count >= 2 else { return }
+                let bounded = min(max(progress, 0), 1)
+                let frameIndex = Int(
+                    (bounded * Double(routeAnimation.frames.count - 1)).rounded()
+                )
+                setRouteAnimationFrame(frameIndex)
+            }
+        )
+    }
+
+    /// Keep the moving annotation and a following camera in the same render
+    /// transaction. Updating them separately lets Map briefly render the new
+    /// annotation against the previous camera center, which looks like jitter.
+    private func setRouteAnimationFrame(_ frameIndex: Int) {
+        guard routeAnimation.frames.indices.contains(frameIndex) else { return }
+        var transaction = Transaction(animation: nil)
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            routeAnimationFrameIndex = frameIndex
+            centerCameraOnAnimationFrame(at: frameIndex)
+        }
+    }
+
+    private func centerCameraOnAnimationFrame(at frameIndex: Int? = nil) {
+        guard followsRouteAnimation,
+              !isManipulatingRouteMap,
+              !routeMapNeedsRecenterAfterInteraction else { return }
+        let index = frameIndex ?? routeAnimationFrameIndex
+        guard routeAnimation.frames.indices.contains(index) else { return }
+        let coordinate = routeAnimation.frames[index].coordinate
+        if let camera = routeCameraViewParameters {
+            position = .camera(MapCamera(
+                centerCoordinate: coordinate,
+                distance: camera.distance,
+                heading: camera.heading,
+                pitch: camera.pitch
+            ))
+        } else if var region = visibleRouteRegion {
+            region.center = coordinate
+            position = .region(region)
+        }
+    }
+
+    private var isManipulatingRouteMap: Bool {
+        isTouchingRouteMap || isDraggingRouteMap || isZoomingRouteMap || isRotatingRouteMap
+    }
+
+    private func routeMapTouchChanged(isTouching: Bool) {
+        guard followsRouteAnimation else { return }
+        if isTouching, !isTouchingRouteMap {
+            routeAnimationWasPlayingBeforeMapTouch = !isRouteAnimationPaused
+            if routeAnimationWasPlayingBeforeMapTouch {
+                isRouteAnimationPaused = true
+            }
+        }
+        isTouchingRouteMap = isTouching
+        if isTouching {
+            isRouteMapRecentering = false
+            routeMapNeedsRecenterAfterInteraction = true
+        } else {
+            finishRouteMapInteraction()
+        }
+    }
+
+    private func routeMapNativeInteractionChanged(
+        _ kind: RouteMapNativeGestureKind,
+        isActive: Bool
+    ) {
+        guard followsRouteAnimation else { return }
+        switch kind {
+        case .pan:
+            isDraggingRouteMap = isActive
+        case .zoom:
+            isZoomingRouteMap = isActive
+        case .rotate:
+            isRotatingRouteMap = isActive
+        }
+        if isActive {
+            isRouteMapRecentering = false
+            routeMapNeedsRecenterAfterInteraction = true
+        } else {
+            finishRouteMapInteraction()
+        }
+    }
+
+    private func finishRouteMapInteraction() {
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(80))
+            guard routeMapNeedsRecenterAfterInteraction,
+                  !isManipulatingRouteMap,
+                  !isRouteMapRecentering else { return }
+            isRouteMapRecentering = true
+            recenterRouteMapAfterInteraction()
+        }
+    }
+
+    private func recenterRouteMapAfterInteraction() {
+        guard routeAnimation.frames.indices.contains(routeAnimationFrameIndex) else {
+            completeRouteMapRecenter()
+            return
+        }
+        let coordinate = routeAnimation.frames[routeAnimationFrameIndex].coordinate
+        if let center = visibleRouteRegion?.center,
+           isRouteMapCenter(center, at: coordinate) {
+            completeRouteMapRecenter()
+            return
+        }
+        if let camera = routeCameraViewParameters {
+            position = .camera(MapCamera(
+                centerCoordinate: coordinate,
+                distance: camera.distance,
+                heading: camera.heading,
+                pitch: camera.pitch
+            ))
+        } else if var region = visibleRouteRegion {
+            region.center = coordinate
+            position = .region(region)
+        } else {
+            completeRouteMapRecenter()
+        }
+    }
+
+    private func completeRouteMapRecenterIfNeeded(at center: CLLocationCoordinate2D) {
+        guard isRouteMapRecentering,
+              routeAnimation.frames.indices.contains(routeAnimationFrameIndex),
+              isRouteMapCenter(center, at: routeAnimation.frames[routeAnimationFrameIndex].coordinate) else {
+            return
+        }
+        completeRouteMapRecenter()
+    }
+
+    private func completeRouteMapRecenter() {
+        var transaction = Transaction(animation: nil)
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            isRouteMapRecentering = false
+            routeMapNeedsRecenterAfterInteraction = false
+            if routeAnimationWasPlayingBeforeMapTouch {
+                isRouteAnimationPaused = false
+            }
+            routeAnimationWasPlayingBeforeMapTouch = false
+        }
+    }
+
+    private func isRouteMapCenter(
+        _ center: CLLocationCoordinate2D,
+        at target: CLLocationCoordinate2D
+    ) -> Bool {
+        CLLocation(latitude: center.latitude, longitude: center.longitude)
+            .distance(from: CLLocation(latitude: target.latitude, longitude: target.longitude)) < 0.5
+    }
+
     /// Reconstructed sparse routes can know their endpoints and distance
     /// without knowing the real departure time. Never render the resulting
     /// physically impossible quotient as if it were a measured average.
@@ -79,6 +675,139 @@ struct TransportModalView: View {
         }
         return speed
     }
+
+    private func animatedTransportIcon(travelsWest: Bool, timeText: String) -> some View {
+        ZStack(alignment: .top) {
+            ZStack {
+                Circle()
+                    .fill(Color(uiColor: .systemBackground))
+                    .frame(width: 30, height: 30)
+                    .overlay(Circle().stroke(Color.dfkAccent, lineWidth: 1.5))
+                    .shadow(color: .black.opacity(0.18), radius: 3, y: 2)
+                Image(systemName: displayType.sfSymbol)
+                    .font(.system(size: 15, weight: .bold))
+                    .foregroundStyle(Color.dfkAccent)
+                    .scaleEffect(x: travelsWest ? -1 : 1, y: 1)
+            }
+
+            Text(timeText)
+                .font(.system(size: 9, weight: .bold, design: .rounded))
+                .lineLimit(1)
+                .foregroundStyle(Color.dfkAccent)
+                .padding(.horizontal, 3)
+                .padding(.vertical, 1)
+                .background(
+                    RoundedRectangle(cornerRadius: 3)
+                        .fill(Color(uiColor: .systemBackground))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 3)
+                        .stroke(Color.dfkAccent, lineWidth: 0.5)
+                )
+                .offset(y: 25)
+        }
+        .frame(width: 48, height: 42, alignment: .top)
+        .offset(y: 6)
+        .accessibilityHidden(true)
+    }
+
+    private func routeEndpointIcon(color: Color, systemImage: String) -> some View {
+        Circle()
+            .fill(color)
+            .frame(width: 22, height: 22)
+            .overlay(Circle().stroke(Color(uiColor: .systemBackground), lineWidth: 2))
+            .overlay {
+                Image(systemName: systemImage)
+                    .font(.system(size: 8, weight: .bold))
+                    .foregroundStyle(.white)
+            }
+            .shadow(color: .black.opacity(0.14), radius: 2, y: 1)
+            .mapAnnotationLayer(MapAnnotationLayer.routeEndpoint)
+            .accessibilityHidden(true)
+    }
+
+    @ViewBuilder
+    private var routeAnimationControls: some View {
+        if routeAnimation.frames.count >= 2 {
+            HStack(spacing: 12) {
+                Button {
+                    followsRouteAnimation.toggle()
+                    if followsRouteAnimation {
+                        centerCameraOnAnimationFrame()
+                    } else {
+                        if routeAnimationWasPlayingBeforeMapTouch {
+                            isRouteAnimationPaused = false
+                        }
+                        routeAnimationWasPlayingBeforeMapTouch = false
+                        isDraggingRouteMap = false
+                        isZoomingRouteMap = false
+                        isRotatingRouteMap = false
+                        isTouchingRouteMap = false
+                        isRouteMapRecentering = false
+                        routeMapNeedsRecenterAfterInteraction = false
+                    }
+                } label: {
+                    Image(systemName: "plus.viewfinder")
+                        .font(.system(size: 14, weight: .bold))
+                        .foregroundStyle(followsRouteAnimation ? Color.white : Color.dfkAccent)
+                        .frame(width: 32, height: 32)
+                        .background(
+                            Circle().fill(
+                                followsRouteAnimation
+                                    ? Color.dfkAccent
+                                    : Color.secondary.opacity(0.12)
+                            )
+                        )
+                        .overlay(
+                            Circle().stroke(Color.dfkAccent.opacity(followsRouteAnimation ? 0 : 0.45), lineWidth: 1)
+                        )
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(followsRouteAnimation ? "关闭镜头跟随" : "开启镜头跟随")
+                .accessibilityValue(followsRouteAnimation ? "已开启" : "已关闭")
+
+                Slider(
+                    value: routeAnimationProgress,
+                    in: 0...1,
+                    onEditingChanged: { isEditing in
+                        if isEditing {
+                            routeAnimationWasPlayingBeforeScrub = !isRouteAnimationPaused
+                            isRouteAnimationPaused = true
+                        } else {
+                            if routeAnimationWasPlayingBeforeScrub {
+                                isRouteAnimationPaused = false
+                            }
+                            routeAnimationWasPlayingBeforeScrub = false
+                        }
+                    }
+                )
+                .tint(.dfkAccent)
+                .accessibilityLabel("路线动画进度")
+
+                Button {
+                    isRouteAnimationPaused.toggle()
+                } label: {
+                    Image(systemName: (isRouteAnimationPaused || accessibilityReduceMotion) ? "play.fill" : "pause.fill")
+                        .font(.system(size: 14, weight: .bold))
+                        .frame(width: 24, height: 24)
+                }
+                .buttonStyle(.bordered)
+                .buttonBorderShape(.circle)
+                .tint(.dfkAccent)
+                .disabled(accessibilityReduceMotion)
+                .accessibilityLabel(
+                    accessibilityReduceMotion
+                        ? "系统已开启减少动态效果"
+                        : (isRouteAnimationPaused ? "继续路线动画" : "暂停路线动画")
+                )
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 8)
+            .dfkDetailMaterial(in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .shadow(color: .black.opacity(0.08), radius: 6, y: 2)
+            .padding(.horizontal, 24)
+        }
+    }
     
     var body: some View {
         NavigationStack {
@@ -86,7 +815,8 @@ struct TransportModalView: View {
                 // 1. Map View
                 GeometryReader { geometry in
                     if geometry.size.width > 1 && geometry.size.height > 1 && interactiveMapReady {
-                        Map(position: $position) {
+                        MapReader { proxy in
+                            Map(position: $position) {
                             // Important Places Circles (isUserDefined)
                             ForEach(allPlaces.filter {
                                 $0.isUserDefined &&
@@ -103,14 +833,16 @@ struct TransportModalView: View {
 
                             // Start Marker (Physical Look & Title)
                             if let start = validStartPoint {
-                                Marker("", systemImage: "play.fill", coordinate: start)
-                                    .tint(.green)
+                                Annotation("", coordinate: start) {
+                                    routeEndpointIcon(color: .green, systemImage: "play.fill")
+                                }
                             }
                             
                             // End Marker (Physical Look & Title)
                             if let end = validEndPoint {
-                                Marker("", systemImage: "stop.fill", coordinate: end)
-                                    .tint(.blue)
+                                Annotation("", coordinate: end) {
+                                    routeEndpointIcon(color: .blue, systemImage: "stop.fill")
+                                }
                             }
                             
                             ForEach(displayedRouteSegments) { segment in
@@ -125,13 +857,99 @@ struct TransportModalView: View {
                                         )
                                     )
                             }
+
+                            // While the camera is following, draw the vehicle as a
+                            // screen-centered overlay below. A map annotation and
+                            // the camera are committed by MapKit on different render
+                            // passes, which otherwise makes the vehicle visibly
+                            // oscillate around the center. During a user gesture the
+                            // real annotation returns so it remains attached to the
+                            // route while the camera is freely manipulated.
+                            if let frame = currentRouteAnimationFrame,
+                               !followsRouteAnimation ||
+                               isManipulatingRouteMap ||
+                               routeMapNeedsRecenterAfterInteraction {
+                                Annotation("", coordinate: frame.coordinate) {
+                                    animatedTransportIcon(
+                                        travelsWest: frame.travelsWest,
+                                        timeText: frame.timeText
+                                    )
+                                    .mapAnnotationLayer(MapAnnotationLayer.animatedTransport)
+                                }
+                            }
                             
-                        }
-                        .mapStyle(.standard(elevation: .automatic, emphasis: .muted, pointsOfInterest: .excludingAll))
-                        .mapControls {
-                            MapUserLocationButton()
-                            MapCompass()
-                            MapScaleView()
+                            }
+                            .mapStyle(.standard(elevation: .automatic, emphasis: .muted, pointsOfInterest: .excludingAll))
+                            .overlay {
+                                if followsRouteAnimation,
+                                   !isManipulatingRouteMap,
+                                   !routeMapNeedsRecenterAfterInteraction,
+                                   let frame = currentRouteAnimationFrame {
+                                    animatedTransportIcon(
+                                        travelsWest: frame.travelsWest,
+                                        timeText: frame.timeText
+                                    )
+                                    .allowsHitTesting(false)
+                                    .accessibilityHidden(true)
+                                }
+                            }
+                            .background {
+                                RouteMapNativeGestureObserver(
+                                    onInteractionChanged: { kind, isActive in
+                                        routeMapNativeInteractionChanged(kind, isActive: isActive)
+                                    },
+                                    onTouchChanged: { isTouching in
+                                        routeMapTouchChanged(isTouching: isTouching)
+                                    }
+                                )
+                            }
+                            .mapControls {
+                                MapUserLocationButton()
+                                MapCompass()
+                                MapScaleView()
+                            }
+                            .onMapCameraChange(frequency: .continuous) { context in
+                                // Outside follow mode, keep the latest camera ready
+                                // for a later follow request. During a follow-mode
+                                // gesture, continuously retain the user's new zoom,
+                                // heading and pitch so recentering changes only the
+                                // target coordinate instead of restoring stale camera
+                                // parameters when the gesture ends.
+                                let parameters = RouteCameraViewParameters(
+                                    distance: context.camera.distance,
+                                    heading: context.camera.heading,
+                                    pitch: context.camera.pitch
+                                )
+                                if routeCameraViewParameters?.meaningfullyDiffers(from: parameters) != false {
+                                    routeCameraViewParameters = parameters
+                                }
+                                if !followsRouteAnimation || routeMapNeedsRecenterAfterInteraction {
+                                    visibleRouteRegion = context.region
+                                }
+                                completeRouteMapRecenterIfNeeded(at: context.camera.centerCoordinate)
+                            }
+                            .onMapCameraChange(frequency: .onEnd) { context in
+                                let parameters = RouteCameraViewParameters(
+                                    distance: context.camera.distance,
+                                    heading: context.camera.heading,
+                                    pitch: context.camera.pitch
+                                )
+                                routeCameraViewParameters = parameters
+                                if !followsRouteAnimation || routeMapNeedsRecenterAfterInteraction {
+                                    visibleRouteRegion = context.region
+                                }
+                                completeRouteMapRecenterIfNeeded(at: context.camera.centerCoordinate)
+                            }
+                            .simultaneousGesture(
+                                SpatialTapGesture(coordinateSpace: .local)
+                                    .onEnded { value in
+                                        guard let coordinate = proxy.convert(value.location, from: .local) else { return }
+                                        openRouteCorrectionIfNeeded(
+                                            at: coordinate,
+                                            mapSize: geometry.size
+                                        )
+                                    }
+                            )
                         }
                     } else {
                         Color.clear
@@ -152,7 +970,9 @@ struct TransportModalView: View {
             }
             .safeAreaInset(edge: .bottom) {
                 // Bottom Info Summary
-                VStack(spacing: 0) {
+                VStack(spacing: 10) {
+                    routeAnimationControls
+
                     VStack(alignment: .leading, spacing: 12) {
                         HStack {
                             VStack(alignment: .leading, spacing: 6) {
@@ -204,10 +1024,17 @@ struct TransportModalView: View {
                                 HStack(spacing: 8) {
                                     Text(distanceString)
                                         .foregroundColor(Color.dfkAccent)
+                                        .lineLimit(1)
+                                        .minimumScaleFactor(0.55)
+                                        .allowsTightening(true)
                                     Text(durationString)
                                         .foregroundColor(.secondary)
+                                        .lineLimit(1)
+                                        .minimumScaleFactor(0.55)
+                                        .allowsTightening(true)
                                 }
                                 .font(.headline)
+                                .fixedSize(horizontal: false, vertical: true)
                                 Group {
                                     if let speed = displayAverageSpeedKmh {
                                         Text(String(format: "%.1f 千米/小时", speed))
@@ -258,13 +1085,67 @@ struct TransportModalView: View {
                     onLocationUpdate?()
                 }
             }
+            .sheet(isPresented: $showingRouteCorrection) {
+                if editableRouteGaps.indices.contains(selectedRouteGapIndex) {
+                    TransportRouteCorrectionView(
+                        transport: displayedTransport.updatingType(displayType),
+                        gaps: [editableRouteGaps[selectedRouteGapIndex]],
+                        initialGapIndex: 0
+                    ) {
+                        inferredRoutesRevision = TransportRouteCompletion.revision
+                        NotificationCenter.default.post(name: TransportRouteCompletion.didChange, object: nil)
+                    }
+                }
+            }
             .task(id: RouteDisplayKey(geometry: displayedTransport.routeGeometryIdentity, type: displayType, revision: inferredRoutesRevision)) {
                 let route = displayedTransport.updatingType(displayType)
-                let segments = await Task.detached(priority: .userInitiated) {
-                    TransportRouteCompletion.cachedSegments(for: route)
+                let prepared = await Task.detached(priority: .userInitiated) {
+                    let gaps = TransportRouteCompletion.gaps(for: route)
+                    let segments = TransportRouteCompletion.cachedSegments(for: route)
+                    return (
+                        segments: segments,
+                        animation: TransportRouteAnimation.make(
+                            segments: segments,
+                            pathPoints: route.pathPoints,
+                            averageSpeed: route.averageSpeed,
+                            startTime: route.startTime,
+                            endTime: route.endTime
+                        ),
+                        gaps: gaps,
+                        tapTargets: gaps.enumerated().map { index, gap in
+                            RouteTapTarget(
+                                gapIndex: index,
+                                coordinates: TransportRouteCompletion.cachedRouteCoordinates(for: gap) ?? [gap.start, gap.end]
+                            )
+                        }
+                    )
                 }.value
                 guard !Task.isCancelled else { return }
-                displayedRouteSegments = segments
+                displayedRouteSegments = prepared.segments
+                routeAnimation = prepared.animation
+                routeAnimationFrameIndex = accessibilityReduceMotion
+                    ? prepared.animation.frames.count / 2
+                    : 0
+                routeAnimationRevision &+= 1
+                editableRouteGaps = prepared.gaps
+                routeTapTargets = prepared.tapTargets
+            }
+            .task(id: "\(routeAnimationRevision)-\(accessibilityReduceMotion)-\(isRouteAnimationPaused)") {
+                if accessibilityReduceMotion {
+                    routeAnimationFrameIndex = routeAnimation.frames.count / 2
+                    return
+                }
+                guard !isRouteAnimationPaused,
+                      routeAnimation.frames.count >= 2,
+                      routeAnimation.frameInterval > 0 else { return }
+                while !Task.isCancelled {
+                    let isAtEnd = routeAnimationFrameIndex == routeAnimation.frames.count - 1
+                    let delay = isAtEnd ? routeAnimation.endPause : routeAnimation.frameInterval
+                    try? await Task.sleep(for: .seconds(delay))
+                    guard !Task.isCancelled, !routeAnimation.frames.isEmpty else { return }
+                    let nextIndex = isAtEnd ? 0 : routeAnimationFrameIndex + 1
+                    setRouteAnimationFrame(nextIndex)
+                }
             }
             // Cache revisions redraw the map without starting another request.
             // Opening or rebuilding the detail view is automatic loading, not a
@@ -301,6 +1182,78 @@ struct TransportModalView: View {
 
             }
         }
+    }
+
+    private func openRouteCorrectionIfNeeded(at coordinate: CLLocationCoordinate2D, mapSize: CGSize) {
+        guard let region = visibleRouteRegion, !routeTapTargets.isEmpty, mapSize.width > 0 else { return }
+        let targets = routeTapTargets
+        Task { @MainActor in
+            let gapIndex = await Task.detached(priority: .userInitiated) {
+                Self.hitGapIndex(
+                    at: coordinate,
+                    targets: targets,
+                    region: region,
+                    mapWidth: mapSize.width
+                )
+            }.value
+            guard let gapIndex else { return }
+            selectedRouteGapIndex = gapIndex
+            showingRouteCorrection = true
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        }
+    }
+
+    nonisolated private static func hitGapIndex(
+        at coordinate: CLLocationCoordinate2D,
+        targets: [RouteTapTarget],
+        region: MKCoordinateRegion,
+        mapWidth: CGFloat
+    ) -> Int? {
+        let west = MKMapPoint(CLLocationCoordinate2D(
+            latitude: region.center.latitude,
+            longitude: region.center.longitude - region.span.longitudeDelta / 2
+        ))
+        let east = MKMapPoint(CLLocationCoordinate2D(
+            latitude: region.center.latitude,
+            longitude: region.center.longitude + region.span.longitudeDelta / 2
+        ))
+        let mapPointsPerScreenPoint = abs(east.x - west.x) / max(Double(mapWidth), 1)
+        let hitDistance = mapPointsPerScreenPoint * 24
+        let tap = MKMapPoint(coordinate)
+        var best: (gapIndex: Int, squaredDistance: Double)?
+
+        for target in targets where target.coordinates.count >= 2 {
+            let points = target.coordinates.map { MKMapPoint($0) }
+            for (start, end) in zip(points, points.dropFirst()) {
+                let squaredDistance = squaredDistance(from: tap, toSegmentFrom: start, to: end)
+                if best == nil || squaredDistance < best!.squaredDistance {
+                    best = (target.gapIndex, squaredDistance)
+                }
+            }
+        }
+        guard let best, best.squaredDistance <= hitDistance * hitDistance else { return nil }
+        return best.gapIndex
+    }
+
+    nonisolated private static func squaredDistance(
+        from point: MKMapPoint,
+        toSegmentFrom start: MKMapPoint,
+        to end: MKMapPoint
+    ) -> Double {
+        let dx = end.x - start.x
+        let dy = end.y - start.y
+        let lengthSquared = dx * dx + dy * dy
+        guard lengthSquared > 0 else {
+            let pointDX = point.x - start.x
+            let pointDY = point.y - start.y
+            return pointDX * pointDX + pointDY * pointDY
+        }
+        let projection = min(max(((point.x - start.x) * dx + (point.y - start.y) * dy) / lengthSquared, 0), 1)
+        let projectedX = start.x + projection * dx
+        let projectedY = start.y + projection * dy
+        let pointDX = point.x - projectedX
+        let pointDY = point.y - projectedY
+        return pointDX * pointDX + pointDY * pointDY
     }
     
     private func findRecord() -> TransportRecord? {
@@ -410,6 +1363,645 @@ struct TransportModalView: View {
         onUpdate?(type)
         
         UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+    }
+}
+
+private struct TransportRouteCorrectionOption: Identifiable, @unchecked Sendable {
+    let id = UUID()
+    let coordinates: [CLLocationCoordinate2D]
+    let distance: CLLocationDistance?
+    let expectedTravelTime: TimeInterval?
+    let title: String?
+}
+
+private struct TransportRouteCorrectionRoutesBox: @unchecked Sendable {
+    let routes: [TripPlannedRoute]
+}
+
+private struct TransportRouteCorrectionView: View {
+    let transport: Transport
+    let gaps: [TransportRouteCompletion.Gap]
+    let onChange: () -> Void
+
+    private enum EditMode: String, CaseIterable, Identifiable {
+        case select
+        case remove
+        case waypoint
+
+        var id: String { rawValue }
+        var title: String {
+            switch self {
+            case .select: return "选路线"
+            case .remove: return "删绕路"
+            case .waypoint: return "加途经点"
+            }
+        }
+    }
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var position: MapCameraPosition = .automatic
+    @State private var selectedGapIndex = 0
+    @State private var editMode: EditMode = .select
+    @State private var waypoint: CLLocationCoordinate2D?
+    @State private var routeOptions: [TransportRouteCorrectionOption] = []
+    @State private var selectedRouteIndex = 0
+    @State private var isLoading = false
+    @State private var isSaving = false
+    @State private var loadFailed = false
+    @State private var selectedGapHasManualRoute = false
+    @State private var selectedGapHasLearnedRoute = false
+    @State private var remembersRouteForFuture = true
+    @State private var saveError: String?
+    @State private var removalStartIndex: Int?
+    @State private var removalEndIndex: Int?
+    @State private var removalStartCoordinate: CLLocationCoordinate2D?
+    @State private var removalEndCoordinate: CLLocationCoordinate2D?
+    @State private var removalPreviewCoordinates: [CLLocationCoordinate2D]?
+    @State private var removedCoordinates: [CLLocationCoordinate2D] = []
+
+    init(
+        transport: Transport,
+        gaps: [TransportRouteCompletion.Gap],
+        initialGapIndex: Int,
+        onChange: @escaping () -> Void
+    ) {
+        self.transport = transport
+        self.gaps = gaps
+        self.onChange = onChange
+        _selectedGapIndex = State(initialValue: gaps.indices.contains(initialGapIndex) ? initialGapIndex : 0)
+    }
+
+    private struct LoadKey: Hashable {
+        let gapKey: String
+        let waypointKey: String
+    }
+
+    private struct RemovalApplication: @unchecked Sendable {
+        let start: Int
+        let end: Int?
+        let preview: [CLLocationCoordinate2D]?
+        let removed: [CLLocationCoordinate2D]
+    }
+
+    private var selectedGap: TransportRouteCompletion.Gap? {
+        gaps.indices.contains(selectedGapIndex) ? gaps[selectedGapIndex] : nil
+    }
+
+    private var selectedOption: TransportRouteCorrectionOption? {
+        routeOptions.indices.contains(selectedRouteIndex) ? routeOptions[selectedRouteIndex] : nil
+    }
+
+    private var previewCoordinates: [CLLocationCoordinate2D]? {
+        removalPreviewCoordinates ?? selectedOption?.coordinates
+    }
+
+    private var loadKey: LoadKey {
+        LoadKey(
+            gapKey: selectedGap?.key ?? "none",
+            waypointKey: waypoint.map { String(format: "%.6f,%.6f", $0.latitude, $0.longitude) } ?? "direct"
+        )
+    }
+
+    private var editorInstructionTitle: String {
+        if editMode == .select {
+            return "选择一条正确路线"
+        } else if editMode == .waypoint {
+            return waypoint == nil ? "点击地图添加途经点" : "再次点击可移动途经点"
+        }
+        if removalStartIndex == nil { return "点击绕路开始的位置" }
+        if removalEndIndex == nil { return "再点击绕路结束的位置" }
+        return "已删除红色绕路段"
+    }
+
+    private var editorInstructionDetail: String {
+        if editMode == .select {
+            return routeOptions.count > 1
+                ? "先选择最接近的方案，再按需要同时删绕路、加途经点。"
+                : "地图服务目前只返回了一条路线，可同时使用删除和途经点继续修正。"
+        } else if editMode == .waypoint {
+            return "路线会经过所选位置重新规划，并保留已经选择的删减区间。"
+        }
+        if removalEndIndex == nil {
+            return "两个切点之间的路线会被移除，并改为直接连接。"
+        }
+        return "蓝色线是组合后的补充路线；还可继续加途经点，原始轨迹和统计不会改变。"
+    }
+
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 0) {
+                MapReader { proxy in
+                    Map(position: $position) {
+                        if let gap = selectedGap {
+                            Marker("缺口起点", systemImage: "play.fill", coordinate: gap.start)
+                                .tint(.green)
+                            Marker("缺口终点", systemImage: "stop.fill", coordinate: gap.end)
+                                .tint(.blue)
+                        }
+                        if let waypoint {
+                            Annotation("途经点", coordinate: waypoint, anchor: .bottom) {
+                                Image(systemName: "mappin.circle.fill")
+                                    .font(.system(size: 30))
+                                    .foregroundStyle(.white, Color.orange)
+                                    .shadow(color: .black.opacity(0.2), radius: 3, y: 2)
+                            }
+                        }
+                        if let option = selectedOption,
+                           let startIndex = removalStartIndex,
+                           option.coordinates.indices.contains(startIndex) {
+                            Marker("删除起点", systemImage: "1.circle.fill", coordinate: option.coordinates[startIndex])
+                                .tint(.orange)
+                        }
+                        if let option = selectedOption,
+                           let endIndex = removalEndIndex,
+                           option.coordinates.indices.contains(endIndex) {
+                            Marker("删除终点", systemImage: "2.circle.fill", coordinate: option.coordinates[endIndex])
+                                .tint(.orange)
+                        }
+                        if let coordinates = previewCoordinates {
+                            MapPolyline(coordinates: coordinates)
+                                .stroke(
+                                    Color.dfkAccent.opacity(0.8),
+                                    style: StrokeStyle(lineWidth: 4, lineCap: .round, lineJoin: .round, dash: [7, 6])
+                                )
+                        }
+                        if removedCoordinates.count >= 2 {
+                            MapPolyline(coordinates: removedCoordinates)
+                                .stroke(
+                                    Color.red.opacity(0.6),
+                                    style: StrokeStyle(lineWidth: 3, lineCap: .round, lineJoin: .round, dash: [4, 4])
+                                )
+                        }
+                    }
+                    .mapStyle(.standard(elevation: .automatic, emphasis: .muted, pointsOfInterest: .excludingAll))
+                    .mapControls {
+                        MapUserLocationButton()
+                        MapCompass()
+                        MapScaleView()
+                    }
+                    .simultaneousGesture(
+                        SpatialTapGesture(coordinateSpace: .local)
+                            .onEnded { value in
+                                guard let coordinate = proxy.convert(value.location, from: .local),
+                                      CLLocationCoordinate2DIsValid(coordinate) else { return }
+                                handleEditorTap(coordinate)
+                            }
+                    )
+                }
+                .frame(maxHeight: .infinity)
+
+                VStack(alignment: .leading, spacing: 12) {
+                    Picker("修正方式", selection: $editMode) {
+                        ForEach(EditMode.allCases) { mode in
+                            Text(mode.title).tag(mode)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+
+                    HStack(alignment: .firstTextBaseline) {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(editorInstructionTitle)
+                                .font(.headline)
+                            Text(editorInstructionDetail)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        if editMode == .waypoint, waypoint != nil {
+                            Button("移除途经点") { waypoint = nil }
+                                .font(.caption.weight(.semibold))
+                        } else if editMode == .remove, removalStartIndex != nil {
+                            Button("重新选择") { clearRemoval() }
+                                .font(.caption.weight(.semibold))
+                        }
+                    }
+
+                    if waypoint != nil || removalEndCoordinate != nil {
+                        HStack(spacing: 8) {
+                            if removalEndCoordinate != nil {
+                                Label("已删绕路", systemImage: "scissors")
+                            }
+                            if waypoint != nil {
+                                Label("已加途经点", systemImage: "mappin")
+                            }
+                        }
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(Color.dfkAccent)
+                    }
+
+                    Toggle("以后相同路段也使用", isOn: $remembersRouteForFuture)
+                        .font(.subheadline.weight(.semibold))
+                        .tint(.dfkAccent)
+
+                    if isLoading {
+                        HStack(spacing: 8) {
+                            ProgressView().controlSize(.small)
+                            Text("正在规划路线…")
+                        }
+                        .foregroundStyle(.secondary)
+                    } else if routeOptions.count > 1, editMode != .remove {
+                        ScrollView(.horizontal, showsIndicators: false) {
+                            HStack(spacing: 8) {
+                                ForEach(routeOptions.indices, id: \.self) { index in
+                                    Button {
+                                        selectRoute(index)
+                                    } label: {
+                                        VStack(alignment: .leading, spacing: 2) {
+                                            Text(routeOptions[index].title ?? "方案 \(index + 1)")
+                                                .font(.subheadline.weight(.semibold))
+                                            Text(optionSummary(routeOptions[index]))
+                                                .font(.caption)
+                                        }
+                                    }
+                                    .buttonStyle(.bordered)
+                                    .tint(index == selectedRouteIndex ? Color.dfkAccent : Color.secondary)
+                                }
+                            }
+                        }
+                    } else if loadFailed {
+                        Text(editMode == .waypoint
+                             ? "暂时无法获取可用路线，请移动途经点后重试。"
+                             : "暂时无法获取其他路线，可尝试删除绕路或添加途经点。")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    } else if let option = selectedOption {
+                        Text(optionSummary(option))
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    HStack {
+                        if selectedGapHasManualRoute || selectedGapHasLearnedRoute {
+                            Button("恢复自动补充", role: .destructive) { resetRoute() }
+                                .disabled(isSaving)
+                        }
+                        Spacer()
+                        Button("保存修正") { saveRoute() }
+                            .buttonStyle(.borderedProminent)
+                            .tint(.dfkAccent)
+                            .disabled(selectedOption == nil || isLoading || isSaving)
+                    }
+                }
+                .padding(16)
+                .dfkDetailMaterial(in: RoundedRectangle(cornerRadius: 24, style: .continuous))
+                .padding(.horizontal, 12)
+                .padding(.bottom, 12)
+            }
+            .navigationTitle("修正补充路线")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button { dismiss() } label: {
+                        Image(systemName: "xmark").dfkToolbarDismissIcon()
+                    }
+                }
+            }
+            .task(id: loadKey) {
+                await loadRoutes()
+            }
+            .alert("无法保存路线", isPresented: Binding(
+                get: { saveError != nil },
+                set: { if !$0 { saveError = nil } }
+            )) {
+                Button("好", role: .cancel) {}
+            } message: {
+                Text(saveError ?? "请稍后重试。")
+            }
+        }
+    }
+
+    @MainActor
+    private func loadRoutes() async {
+        guard let gap = selectedGap else { return }
+        isLoading = true
+        loadFailed = false
+        if removalStartCoordinate != nil {
+            removalStartIndex = nil
+            removalEndIndex = nil
+            removalPreviewCoordinates = nil
+            removedCoordinates = []
+        }
+        let existing = await Task.detached(priority: .utility) {
+            (
+                coordinates: TransportRouteCompletion.cachedRouteCoordinates(for: gap),
+                isManual: TransportRouteCompletion.hasManualRoute(for: gap),
+                isLearned: TransportRouteCompletion.hasLearnedRoute(for: gap)
+            )
+        }.value
+        guard !Task.isCancelled else { return }
+        selectedGapHasManualRoute = existing.isManual
+        selectedGapHasLearnedRoute = existing.isLearned
+
+        if waypoint == nil, let coordinates = existing.coordinates {
+            routeOptions = [TransportRouteCorrectionOption(
+                coordinates: coordinates,
+                distance: nil,
+                expectedTravelTime: nil,
+                title: existing.isManual
+                    ? "当前修正路线"
+                    : (existing.isLearned ? "常走补充路线" : "当前补充路线")
+            )]
+            selectedRouteIndex = 0
+            await reapplyRemoval(to: coordinates)
+            fitMap(to: coordinates)
+        } else {
+            routeOptions = []
+        }
+
+        let firstRoutes = await TencentTripDirections.routes(
+            from: gap.start,
+            to: waypoint ?? gap.end,
+            transportTypeRaw: gap.type.rawValue
+        )
+        guard !Task.isCancelled else { return }
+        if waypoint == nil, existing.coordinates == nil, !firstRoutes.isEmpty {
+            let candidates = TransportRouteCorrectionRoutesBox(routes: firstRoutes)
+            let cached = await Task.detached(priority: .utility) {
+                TransportRouteCompletion.cacheBestAutomaticRoute(
+                    from: candidates.routes,
+                    for: gap
+                )
+            }.value
+            guard !Task.isCancelled else { return }
+            if cached {
+                NotificationCenter.default.post(name: TransportRouteCompletion.didChange, object: nil)
+                _ = Task { await WidgetDataSyncManager.shared.syncAll() }
+            }
+        }
+        let secondRoutes: [TripPlannedRoute]
+        if let waypoint {
+            secondRoutes = await TencentTripDirections.routes(
+                from: waypoint,
+                to: gap.end,
+                transportTypeRaw: gap.type.rawValue
+            )
+        } else {
+            secondRoutes = []
+        }
+        guard !Task.isCancelled else { return }
+
+        let firstBox = TransportRouteCorrectionRoutesBox(routes: firstRoutes)
+        let secondBox = TransportRouteCorrectionRoutesBox(routes: secondRoutes)
+        let hasWaypoint = waypoint != nil
+        let planned = await Task.detached(priority: .userInitiated) {
+            Self.makeOptions(first: firstBox.routes, second: secondBox.routes, hasWaypoint: hasWaypoint)
+        }.value
+        guard !Task.isCancelled else { return }
+
+        if !planned.isEmpty {
+            if existing.isManual && waypoint == nil, let current = routeOptions.first {
+                routeOptions = [current] + planned.filter { !Self.sameRoute($0.coordinates, current.coordinates) }
+            } else {
+                routeOptions = planned
+            }
+            selectedRouteIndex = 0
+            if let coordinates = routeOptions.first?.coordinates {
+                await reapplyRemoval(to: coordinates)
+                fitMap(to: coordinates)
+            }
+        }
+        loadFailed = routeOptions.isEmpty
+        isLoading = false
+    }
+
+    private func handleEditorTap(_ coordinate: CLLocationCoordinate2D) {
+        if editMode == .select { return }
+        if editMode == .waypoint {
+            waypoint = coordinate
+            selectedRouteIndex = 0
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            return
+        }
+        guard let option = selectedOption, !option.coordinates.isEmpty else { return }
+        let coordinates = option.coordinates
+        Task { @MainActor in
+            let index = await Task.detached(priority: .userInitiated) {
+                Self.nearestCoordinateIndex(to: coordinate, in: coordinates)
+            }.value
+            guard let index else { return }
+            if removalStartIndex == nil || removalEndIndex != nil {
+                removalStartIndex = index
+                removalEndIndex = nil
+                removalStartCoordinate = coordinates[index]
+                removalEndCoordinate = nil
+                removalPreviewCoordinates = nil
+                removedCoordinates = []
+                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                return
+            }
+            guard let startIndex = removalStartIndex else { return }
+            let preview = await Task.detached(priority: .userInitiated) {
+                Self.removingRouteSection(coordinates, from: startIndex, to: index)
+            }.value
+            guard let preview else {
+                UINotificationFeedbackGenerator().notificationOccurred(.warning)
+                return
+            }
+            removalStartIndex = preview.lowerIndex
+            removalEndIndex = preview.upperIndex
+            removalStartCoordinate = coordinates[preview.lowerIndex]
+            removalEndCoordinate = coordinates[preview.upperIndex]
+            removalPreviewCoordinates = preview.coordinates
+            removedCoordinates = preview.removed
+            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+        }
+    }
+
+    nonisolated private static func nearestCoordinateIndex(
+        to coordinate: CLLocationCoordinate2D,
+        in coordinates: [CLLocationCoordinate2D]
+    ) -> Int? {
+        let target = MKMapPoint(coordinate)
+        return coordinates.indices.min { lhs, rhs in
+            let lhsPoint = MKMapPoint(coordinates[lhs])
+            let rhsPoint = MKMapPoint(coordinates[rhs])
+            let lhsDX = lhsPoint.x - target.x
+            let lhsDY = lhsPoint.y - target.y
+            let rhsDX = rhsPoint.x - target.x
+            let rhsDY = rhsPoint.y - target.y
+            return lhsDX * lhsDX + lhsDY * lhsDY < rhsDX * rhsDX + rhsDY * rhsDY
+        }
+    }
+
+    nonisolated private static func removingRouteSection(
+        _ coordinates: [CLLocationCoordinate2D],
+        from firstIndex: Int,
+        to secondIndex: Int
+    ) -> (coordinates: [CLLocationCoordinate2D], removed: [CLLocationCoordinate2D], lowerIndex: Int, upperIndex: Int)? {
+        let lower = min(firstIndex, secondIndex)
+        let upper = max(firstIndex, secondIndex)
+        guard coordinates.indices.contains(lower), coordinates.indices.contains(upper), upper - lower >= 2 else {
+            return nil
+        }
+        let kept = Array(coordinates[...lower]) + Array(coordinates[upper...])
+        return (kept, Array(coordinates[lower...upper]), lower, upper)
+    }
+
+    private func selectRoute(_ index: Int) {
+        guard routeOptions.indices.contains(index) else { return }
+        selectedRouteIndex = index
+        let coordinates = routeOptions[index].coordinates
+        Task { @MainActor in
+            await reapplyRemoval(to: coordinates)
+            fitMap(to: coordinates)
+        }
+    }
+
+    private func clearRemoval() {
+        removalStartIndex = nil
+        removalEndIndex = nil
+        removalStartCoordinate = nil
+        removalEndCoordinate = nil
+        removalPreviewCoordinates = nil
+        removedCoordinates = []
+    }
+
+    @MainActor
+    private func reapplyRemoval(to coordinates: [CLLocationCoordinate2D]) async {
+        guard let startCoordinate = removalStartCoordinate else {
+            removalStartIndex = nil
+            removalEndIndex = nil
+            removalPreviewCoordinates = nil
+            removedCoordinates = []
+            return
+        }
+        let endCoordinate = removalEndCoordinate
+        let reapplied = await Task.detached(priority: .userInitiated) {
+            guard let startIndex = Self.nearestCoordinateIndex(to: startCoordinate, in: coordinates) else {
+                return nil as RemovalApplication?
+            }
+            guard let endCoordinate,
+                  let endIndex = Self.nearestCoordinateIndex(to: endCoordinate, in: coordinates) else {
+                return RemovalApplication(start: startIndex, end: nil, preview: nil, removed: [])
+            }
+            guard let preview = Self.removingRouteSection(coordinates, from: startIndex, to: endIndex) else {
+                return RemovalApplication(start: startIndex, end: endIndex, preview: nil, removed: [])
+            }
+            return RemovalApplication(
+                start: preview.lowerIndex,
+                end: preview.upperIndex,
+                preview: preview.coordinates,
+                removed: preview.removed
+            )
+        }.value
+        guard let reapplied else { return }
+        removalStartIndex = reapplied.start
+        removalEndIndex = reapplied.end
+        removalPreviewCoordinates = reapplied.preview
+        removedCoordinates = reapplied.removed
+    }
+
+    nonisolated private static func makeOptions(
+        first: [TripPlannedRoute],
+        second: [TripPlannedRoute],
+        hasWaypoint: Bool
+    ) -> [TransportRouteCorrectionOption] {
+        if !hasWaypoint {
+            return first.map {
+                TransportRouteCorrectionOption(
+                    coordinates: $0.coordinates,
+                    distance: $0.distance,
+                    expectedTravelTime: $0.expectedTravelTime,
+                    title: nil
+                )
+            }
+        }
+        guard !first.isEmpty, !second.isEmpty else { return [] }
+        return first.flatMap { leading in
+            second.map { trailing in
+                var coordinates = leading.coordinates
+                let trailingCoordinates = trailing.coordinates
+                coordinates.append(contentsOf: trailingCoordinates.dropFirst())
+                return TransportRouteCorrectionOption(
+                    coordinates: coordinates,
+                    distance: leading.distance + trailing.distance,
+                    expectedTravelTime: leading.expectedTravelTime + trailing.expectedTravelTime,
+                    title: nil
+                )
+            }
+        }
+    }
+
+    nonisolated private static func sameRoute(
+        _ lhs: [CLLocationCoordinate2D],
+        _ rhs: [CLLocationCoordinate2D]
+    ) -> Bool {
+        guard let lhsFirst = lhs.first, let lhsLast = lhs.last,
+              let rhsFirst = rhs.first, let rhsLast = rhs.last else { return false }
+        return lhs.count == rhs.count &&
+            lhsFirst.latitude == rhsFirst.latitude &&
+            lhsFirst.longitude == rhsFirst.longitude &&
+            lhsLast.latitude == rhsLast.latitude &&
+            lhsLast.longitude == rhsLast.longitude
+    }
+
+    private func optionSummary(_ option: TransportRouteCorrectionOption) -> String {
+        guard let distance = option.distance, let duration = option.expectedTravelTime else {
+            return "已保存的显示路线"
+        }
+        let distanceText = distance < 1_000
+            ? "\(max(1, Int(distance.rounded())))米"
+            : String(format: "%.1f公里", distance / 1_000)
+        let minutes = max(1, Int((duration / 60).rounded()))
+        return "\(distanceText) · 约\(minutes)分钟"
+    }
+
+    private func fitMap(to coordinates: [CLLocationCoordinate2D]) {
+        Task { @MainActor in
+            let region = await Task.detached(priority: .userInitiated) {
+                coordinates.boundingRegion(paddingFactor: 1.45)
+            }.value
+            guard let region else { return }
+            withAnimation(.easeInOut(duration: 0.35)) { position = .region(region) }
+        }
+    }
+
+    private func saveRoute() {
+        guard let gap = selectedGap, let coordinates = previewCoordinates else { return }
+        isSaving = true
+        let learnsForFuture = remembersRouteForFuture
+        Task { @MainActor in
+            let result = await Task.detached(priority: .userInitiated) {
+                TransportRouteCompletion.saveManualRoute(
+                    coordinates,
+                    for: gap,
+                    learnsForFuture: learnsForFuture
+                )
+            }.value
+            isSaving = false
+            guard result.routeSaved else {
+                saveError = "路线文件写入失败，原始轨迹没有受到影响。"
+                return
+            }
+            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+            onChange()
+            guard result.learnedRouteSaved else {
+                selectedGapHasManualRoute = true
+                saveError = "本次修正已保存，但常走路线记忆失败，请稍后重试。"
+                return
+            }
+            dismiss()
+        }
+    }
+
+    private func resetRoute() {
+        guard let gap = selectedGap else { return }
+        isSaving = true
+        Task { @MainActor in
+            let reset = await Task.detached(priority: .userInitiated) {
+                TransportRouteCompletion.resetManualRoute(for: gap)
+            }.value
+            guard reset else {
+                isSaving = false
+                saveError = "无法恢复自动补充，当前修正路线仍然保留。"
+                return
+            }
+            onChange()
+            await TransportRouteCompletion.prepare([transport], activelyRequested: true)
+            isSaving = false
+            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+            dismiss()
+        }
     }
 }
 
