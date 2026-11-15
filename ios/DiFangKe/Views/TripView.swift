@@ -7724,7 +7724,9 @@ private struct TripPlanRouteSheet: View {
                 ScrollViewReader { proxy in
                     ScrollView {
                         VStack(alignment: .leading, spacing: 10) {
-                        Text(selection.title).font(.title2.bold())
+                        Text(routeEndpointText ?? selection.title)
+                            .font(.title3.bold())
+                            .lineLimit(2)
                         transportTypeMenu
                         VStack(alignment: .leading, spacing: 8) {
                             Text("交通备注")
@@ -7914,6 +7916,13 @@ private struct TripPlanRouteSheet: View {
 
     private var effectiveOrigin: CLLocationCoordinate2D? {
         selection.origin
+    }
+
+    private var routeEndpointText: String? {
+        guard selection.origin != nil else { return nil }
+        let originName = selection.originName?.nilIfEmpty ?? "起点"
+        let destinationName = selection.destinationName?.nilIfEmpty ?? selection.title
+        return "\(originName) → \(destinationName)"
     }
 
     private var routeSummary: String? {

@@ -201,6 +201,7 @@ private struct ReviewPlaceSelection: Identifiable {
     let rangeText: String
     let visits: [Footprint]
     let photoAssetIDs: [String]
+    let visitDays: [ReviewPlaceVisitDaySelection]
     /// Precomputed off main with the selection.
     let stats: ReviewPlaceStats
 
@@ -214,6 +215,12 @@ private struct ReviewPlaceSelection: Identifiable {
         self.visits = visits
         self.photoAssetIDs = group.photoAssetIDs
         self.stats = group.stats
+        self.visitDays = group.stats.visitDays.map { day in
+            ReviewPlaceVisitDaySelection(
+                summary: day,
+                footprints: day.footprintIDs.compactMap { footprintsByID[$0] }
+            )
+        }
     }
 }
 
@@ -1002,12 +1009,19 @@ private struct ReviewRhythmMetrics: Codable {
 
 private struct ReviewPlaceVisitDay: Identifiable {
     let date: Date
+    let footprintIDs: [UUID]
     let visitCount: Int
     let totalDuration: TimeInterval
     let activities: [ReviewActivitySnapshot]
     let photoCount: Int
     let reasons: [String]
     var id: Date { date }
+}
+
+private struct ReviewPlaceVisitDaySelection: Identifiable {
+    let summary: ReviewPlaceVisitDay
+    let footprints: [Footprint]
+    var id: Date { summary.id }
 }
 
 private struct ReviewPlaceStats {
@@ -2344,31 +2358,34 @@ private enum ReviewDataBuilder {
         let orderedVisits = visits.sorted { $0.startTime > $1.startTime }
         guard let representative = orderedVisits.first else { return nil }
 
-        let photoAssetIDs: [String]
-        if let resolvedPhotoAssetIDs {
-            photoAssetIDs = resolvedPhotoAssetIDs
-        } else {
-            var seenPhotoIDs: Set<String> = []
-            var recoveredPhotoAssetIDs: [String] = []
-            for visit in orderedVisits {
-                let visitPhotoAssetIDs = await displayablePhotoAssetIDs(for: visit)
-                recoveredPhotoAssetIDs.append(contentsOf: visitPhotoAssetIDs.filter { seenPhotoIDs.insert($0).inserted })
-                if Task.isCancelled { return nil }
-            }
-            photoAssetIDs = recoveredPhotoAssetIDs
+        var seenPhotoIDs: Set<String> = []
+        var recoveredPhotoAssetIDs: [String] = []
+        var displayablePhotoAssetIDsByFootprintID: [UUID: [String]] = [:]
+        for visit in orderedVisits {
+            let visitPhotoAssetIDs = await displayablePhotoAssetIDs(for: visit)
+            displayablePhotoAssetIDsByFootprintID[visit.footprintID] = visitPhotoAssetIDs
+            recoveredPhotoAssetIDs.append(contentsOf: visitPhotoAssetIDs.filter { seenPhotoIDs.insert($0).inserted })
+            if Task.isCancelled { return nil }
         }
+        let photoAssetIDs = resolvedPhotoAssetIDs ?? recoveredPhotoAssetIDs
         return ReviewPlaceGroup(
             id: id,
             title: representative[keyPath: titleKeyPath],
             visitIDs: orderedVisits.map(\.footprintID),
             photoAssetIDs: await PhotoService.shared.assetIDsOldestFirstAsync(photoAssetIDs),
-            stats: placeStats(for: orderedVisits)
+            stats: placeStats(
+                for: orderedVisits,
+                displayablePhotoAssetIDsByFootprintID: displayablePhotoAssetIDsByFootprintID
+            )
         )
     }
 
     /// The former `ReviewPlaceView` computed statistics, for visits ordered
     /// newest first.
-    private static func placeStats(for visits: [ReviewFootprintSnapshot]) -> ReviewPlaceStats {
+    private static func placeStats(
+        for visits: [ReviewFootprintSnapshot],
+        displayablePhotoAssetIDsByFootprintID: [UUID: [String]]
+    ) -> ReviewPlaceStats {
         let calendar = Calendar.current
         let representative = visits.max {
             if $0.photoAssetIDs.count != $1.photoAssetIDs.count {
@@ -2409,12 +2426,15 @@ private enum ReviewDataBuilder {
         }.map { date, dailyVisits in
             var activityNames: Set<String> = []
             let activities = dailyVisits.compactMap(\.activity).filter { activityNames.insert($0.name).inserted }
-            let photoIDs = Set(dailyVisits.flatMap(\.photoAssetIDs))
+            let photoIDs = Set(dailyVisits.flatMap {
+                displayablePhotoAssetIDsByFootprintID[$0.footprintID] ?? []
+            })
             var seenReasons: Set<String> = []
             let reasons = dailyVisits.compactMap { $0.reason?.trimmingCharacters(in: .whitespacesAndNewlines) }
                 .filter { !$0.isEmpty && seenReasons.insert($0).inserted }
             return ReviewPlaceVisitDay(
                 date: date,
+                footprintIDs: dailyVisits.map(\.footprintID),
                 visitCount: dailyVisits.count,
                 totalDuration: dailyVisits.reduce(0) { $0 + $1.duration },
                 activities: activities,
@@ -6012,11 +6032,15 @@ private extension View {
 
 private struct ReviewPlaceView: View {
     @Environment(\.dismiss) private var dismiss
+    @Query(sort: \Place.name) private var allPlaces: [Place]
     let selection: ReviewPlaceSelection
     let rangeControl: ReviewRangeControl?
     @State private var mapPosition: MapCameraPosition
     @State private var selectedPhotoID: IdentifiableString?
     @State private var showsAllPhotos = false
+    @State private var selectedFootprint: Footprint?
+    @State private var selectedFootprintGroup: DFKMapView.AggregatedFootprint?
+    @State private var footprintSelectedFromGroup: Footprint?
     private let photoPreviewCount = AppConfig.shared.reviewPlacePhotoPreviewCount
 
     init(selection: ReviewPlaceSelection, rangeControl: ReviewRangeControl? = nil) {
@@ -6124,7 +6148,7 @@ private struct ReviewPlaceView: View {
                 VStack(alignment: .leading, spacing: 12) {
                     Text("到访记录")
                         .font(.title2.bold())
-                    ForEach(selection.stats.visitDays) { day in
+                    ForEach(selection.visitDays) { day in
                         visitRow(day)
                     }
                 }
@@ -6148,6 +6172,19 @@ private struct ReviewPlaceView: View {
         .fullScreenCover(item: $selectedPhotoID) { selectedPhoto in
             let index = selection.photoAssetIDs.firstIndex(of: selectedPhoto.value) ?? 0
             PhotoFullscreenView(assetIDs: selection.photoAssetIDs, currentIndex: index)
+        }
+        .sheet(item: $selectedFootprint) { footprint in
+            FootprintModalView(footprint: footprint, allPlaces: allPlaces)
+        }
+        .sheet(item: $selectedFootprintGroup, onDismiss: {
+            guard let footprint = footprintSelectedFromGroup else { return }
+            footprintSelectedFromGroup = nil
+            selectedFootprint = footprint
+        }) { aggregated in
+            FootprintGroupSheet(aggregated: aggregated, allPlaces: allPlaces) { footprint in
+                footprintSelectedFromGroup = footprint
+                selectedFootprintGroup = nil
+            }
         }
     }
 
@@ -6312,51 +6349,73 @@ private struct ReviewPlaceView: View {
         selection.stats.hourlyCounts
     }
 
-    private func visitRow(_ day: ReviewPlaceVisitDay) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .firstTextBaseline, spacing: 12) {
-                Text(day.date.formatted(.dateTime.month().day()))
-                    .font(.headline.bold())
-                    .lineLimit(1)
-                Spacer(minLength: 12)
-                Text("\(day.visitCount)次 · 累计\(placeDurationText(day.totalDuration))")
-                    .font(.subheadline.weight(.semibold))
-                    .monospacedDigit()
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.75)
-            }
+    private func visitRow(_ day: ReviewPlaceVisitDaySelection) -> some View {
+        Button {
+            openFootprints(day.footprints, id: day.id, totalDuration: day.summary.totalDuration)
+        } label: {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(alignment: .firstTextBaseline, spacing: 12) {
+                    Text(day.summary.date.formatted(.dateTime.month().day()))
+                        .font(.headline.bold())
+                        .lineLimit(1)
+                    Spacer(minLength: 12)
+                    Text("\(day.summary.visitCount)次 · 累计\(placeDurationText(day.summary.totalDuration))")
+                        .font(.subheadline.weight(.semibold))
+                        .monospacedDigit()
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.75)
+                }
 
-            if !day.activities.isEmpty || day.photoCount > 0 {
-                HStack(alignment: .top, spacing: 12) {
-                    FlowLayout(spacing: 8) {
-                        ForEach(day.activities, id: \.name) { activity in
-                            Label(activity.name, systemImage: activity.icon)
-                                .font(.subheadline.weight(.medium))
-                                .foregroundStyle(activity.color)
+                if !day.summary.activities.isEmpty || day.summary.photoCount > 0 {
+                    HStack(alignment: .top, spacing: 12) {
+                        FlowLayout(spacing: 8) {
+                            ForEach(day.summary.activities, id: \.name) { activity in
+                                Label(activity.name, systemImage: activity.icon)
+                                    .font(.subheadline.weight(.medium))
+                                    .foregroundStyle(activity.color)
+                                    .lineLimit(1)
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        if day.summary.photoCount > 0 {
+                            Label("\(day.summary.photoCount)张照片", systemImage: "photo")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
                                 .lineLimit(1)
+                                .fixedSize()
                         }
                     }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    if day.photoCount > 0 {
-                        Label("\(day.photoCount)张照片", systemImage: "photo")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                            .fixedSize()
-                    }
+                }
+
+                ForEach(day.summary.reasons, id: \.self) { reason in
+                    Text(reason)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(3)
                 }
             }
-
-            ForEach(day.reasons, id: \.self) { reason in
-                Text(reason)
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(3)
-            }
+            .padding(14)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color(uiColor: .secondarySystemBackground), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
         }
-        .padding(14)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color(uiColor: .secondarySystemBackground), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .buttonStyle(.plain)
+        .disabled(day.footprints.isEmpty)
+    }
+
+    private func openFootprints(_ footprints: [Footprint], id: Date, totalDuration: TimeInterval) {
+        guard let first = footprints.first else { return }
+        if footprints.count == 1 {
+            selectedFootprint = first
+            return
+        }
+        selectedFootprintGroup = DFKMapView.AggregatedFootprint(
+            id: "review-visit-day-\(id.timeIntervalSince1970)",
+            coordinate: CLLocationCoordinate2D(latitude: first.latitude, longitude: first.longitude),
+            totalDuration: totalDuration,
+            representative: first,
+            footprints: footprints,
+            placeCount: 1
+        )
     }
 
     private func placeDurationText(_ duration: TimeInterval) -> String {

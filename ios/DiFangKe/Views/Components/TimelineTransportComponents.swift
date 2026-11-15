@@ -266,10 +266,13 @@ struct TransportModalView: View {
                 guard !Task.isCancelled else { return }
                 displayedRouteSegments = segments
             }
-            // Cache revisions redraw the map without starting another explicit retry.
+            // Cache revisions redraw the map without starting another request.
+            // Opening or rebuilding the detail view is automatic loading, not a
+            // user-requested retry, so it must keep the configured cooldown and
+            // persisted failure limit instead of bypassing them.
             .task(id: RouteDisplayKey(geometry: displayedTransport.routeGeometryIdentity, type: displayType, revision: 0)) {
                 let route = displayedTransport.updatingType(displayType)
-                await TransportRouteCompletion.prepare([route], activelyRequested: true)
+                await TransportRouteCompletion.prepare([route])
             }
             .onReceive(NotificationCenter.default.publisher(for: TransportRouteCompletion.didChange)) { _ in
                 inferredRoutesRevision = TransportRouteCompletion.revision

@@ -129,21 +129,11 @@ struct FootprintModalView: View {
 
     private func refreshPhotoAssetOrder() async {
         orderedPhotoAssetIDs = nil
-        let assetIDs = footprint.photoAssetIDs
-        guard !assetIDs.isEmpty else {
-            orderedPhotoAssetIDs = []
-            return
-        }
-
-        // `photoAssetIDs` may contain local identifiers synced from another
-        // device. They are not valid identifiers in this photo library and
-        // rendering them creates a second set of permanently empty tiles.
-        // Keep the stored references for Cloud Identifier recovery, but only
-        // present assets that Photos can actually resolve on this device.
-        let displayable = await photoService.displayableAssetIDsAsync(
-            assetIDs,
-            during: DateInterval(start: footprint.startTime, end: max(footprint.startTime, footprint.endTime))
-        )
+        // Use the same display-only recovery path as Review: resolve stored
+        // cross-device identifiers first, then recover missing legacy links
+        // with the existing time-and-location matching rule. Stored references
+        // remain untouched.
+        let displayable = await photoService.displayableAssetIDs(for: footprint)
         guard !Task.isCancelled else { return }
         orderedPhotoAssetIDs = displayable
     }

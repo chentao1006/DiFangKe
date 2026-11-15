@@ -279,6 +279,8 @@ struct ActivityPickerPresentation: Identifiable {
 struct StableActivityPickerPopover: View {
     @Environment(\.dismiss) private var dismiss
 
+    private let horizontalContentPadding: CGFloat = 28
+
     let suggestedItems: [StableActivityPickerItem]
     let allItems: [StableActivityPickerItem]
     let onSelect: (UUID?) -> Void
@@ -354,7 +356,7 @@ struct StableActivityPickerPopover: View {
         Text(title)
             .font(.caption.weight(.semibold))
             .foregroundStyle(.secondary)
-            .padding(.horizontal, 16)
+            .padding(.horizontal, horizontalContentPadding)
             .padding(.vertical, 6)
     }
 
@@ -363,16 +365,21 @@ struct StableActivityPickerPopover: View {
             .font(.body)
             .foregroundStyle(.secondary)
             .frame(maxWidth: .infinity, minHeight: 56, alignment: .leading)
-            .padding(.horizontal, 16)
+            .padding(.horizontal, horizontalContentPadding)
     }
 
     private func pickerButton(title: String, icon: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            Label(title, systemImage: icon)
+            HStack(spacing: 8) {
+                Image(systemName: icon)
+                    .frame(width: 28)
+
+                Text(title)
+            }
                 .font(.body)
                 .foregroundStyle(.primary)
                 .frame(maxWidth: .infinity, minHeight: 48, alignment: .leading)
-                .padding(.horizontal, 16)
+                .padding(.horizontal, horizontalContentPadding)
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
