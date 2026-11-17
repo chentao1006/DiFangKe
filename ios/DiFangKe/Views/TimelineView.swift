@@ -278,9 +278,12 @@ struct TimelineScene<Content: View>: View {
 
     @Environment(\.modelContext) private var modelContext
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.accessibilityReduceMotion) private var accessibilityReduceMotion
     @Environment(LocationManager.self) private var locationManager
     @AppStorage("isTrackingEnabled") private var isTrackingEnabled = true
+    @AppStorage("transportRouteAnimationFollowEnabled") private var followsDayPlayback = false
     @Query(sort: \Place.name) private var allPlaces: [Place]
+    @Query(sort: [SortDescriptor(\ActivityType.sortOrder), SortDescriptor(\ActivityType.name)]) private var allActivities: [ActivityType]
     @State private var cameraPosition: MapCameraPosition = .automatic
     @State private var showLocationSettingsAlert = false
     @State private var showingArrivalConfirmation = false
@@ -306,6 +309,7 @@ struct TimelineScene<Content: View>: View {
     @State private var deferredVisibleTimelineDates: Set<Date>?
     @State private var deferredTimelineWorkCount = 0
     @State private var mapViewportSize: CGSize = .zero
+    @State private var dayPlaybackControlSize: CGSize = .zero
     @State private var mapViewportRevision = 0
     @State private var didRequestInitialTimeline = false
     @State private var hasCompletedInitialTimelineLoad = false
@@ -332,6 +336,40 @@ struct TimelineScene<Content: View>: View {
     @State private var lockedMapCameraTask: Task<Void, Never>?
     @State private var selectedFootprintGroup: DFKMapView.AggregatedFootprint?
     @State private var selectedMapPhotoAssetID: String? = nil
+    @State private var dayPlayback = DayRoutePlayback.empty
+    @State private var dayPlaybackItems: [TimelineItem] = []
+    @State private var dayPlaybackDate: Date?
+    @State private var dayPlaybackFrameIndex = 0
+    @State private var requestedDayPlaybackFrameIndex = 0
+    @State private var dayPlaybackHighlightedSegments: [TransportLineSegment] = []
+    @State private var dayPlaybackRevision = 0
+    @State private var isDayPlaybackPaused = false
+    @State private var isDayPlaybackControlScrubbing = false
+    @State private var dayPlaybackWasRunningBeforeTouch = false
+    @State private var isTouchingDayPlaybackMap = false
+    @State private var isDayPlaybackRecentering = false
+    @State private var isDayPlaybackFramingRoute = false
+    @State private var dayPlaybackFramedRouteIndex: Int?
+    @State private var dayPlaybackWasRunningBeforeRouteFraming = false
+    @State private var dayPlaybackRouteFramingTask: Task<Void, Never>?
+    @State private var isDayPlaybackFramingStop = false
+    @State private var dayPlaybackFramedStopIndex: Int?
+    @State private var dayPlaybackWasRunningBeforeStopFraming = false
+    @State private var dayPlaybackStopFramingTask: Task<Void, Never>?
+    @State private var dayPlaybackStopFollowRegion: MKCoordinateRegion?
+    @State private var dayPlaybackTransportFollowRegion: MKCoordinateRegion?
+    @State private var timelineHasCoveringPresentation = false
+    @State private var isDayPlaybackCoveredByUI = false
+    @State private var dayPlaybackDefersTimelineReload = false
+    @State private var isPreparingDayPlayback = false
+    @State private var timelineDetentBeforeDayPlayback: PresentationDetent?
+    @State private var cameraPositionBeforeDayPlayback: MapCameraPosition?
+    @State private var visibleTimelineItemsBeforeDayPlayback: [TimelineItem] = []
+    @State private var mapInteractionLockBeforeDayPlayback: Set<Date>?
+    @State private var activeTimelineDateBeforeDayPlayback: Date?
+    @State private var dayPlaybackVisibleCamera: MapCamera?
+    @State private var dayPlaybackPreparationTask: Task<Void, Never>?
+    @State private var dayPlaybackScrubFrameTask: Task<Void, Never>?
 
 
     private var timelineDates: [Date] {
@@ -350,7 +388,56 @@ struct TimelineScene<Content: View>: View {
     }
 
     private var mapTimelineItems: [TimelineItem] {
-        visibleTimelineItems
+        if dayPlaybackDate != nil { return dayPlaybackItems }
+        return visibleTimelineItems
+    }
+
+    private var isCoveringDayPlaybackUI: Bool {
+        timelineHasCoveringPresentation ||
+            showLocationSettingsAlert ||
+            showingArrivalConfirmation ||
+            scenePhase != .active
+    }
+
+    private var currentTrailingSafeAreaInset: CGFloat {
+        for scene in UIApplication.shared.connectedScenes {
+            guard let windowScene = scene as? UIWindowScene else { continue }
+            if let keyWindow = windowScene.windows.first(where: { $0.isKeyWindow }) {
+                return keyWindow.safeAreaInsets.right
+            }
+        }
+        return 0
+    }
+
+    private var canAdvanceDayPlayback: Bool {
+        dayPlaybackDate != nil &&
+            !isDayPlaybackPaused &&
+            !isDayPlaybackControlScrubbing &&
+            !isDayPlaybackFramingRoute &&
+            !isDayPlaybackFramingStop &&
+            !isTouchingDayPlaybackMap &&
+            !isDayPlaybackRecentering &&
+            !isDayPlaybackCoveredByUI &&
+            !accessibilityReduceMotion
+    }
+
+    private var dayPlaybackOverlay: DFKMapPlaybackOverlay? {
+        guard dayPlayback.frames.indices.contains(dayPlaybackFrameIndex) else { return nil }
+        let frame = dayPlayback.frames[dayPlaybackFrameIndex]
+        let components = Calendar.current.dateComponents([.hour, .minute], from: frame.timestamp)
+        let markerColor = frame.isStop
+            ? (frame.activityColorHex.flatMap { Color(hex: $0) } ?? .gray)
+            : .dfkAccent
+        return DFKMapPlaybackOverlay(
+            coordinate: frame.coordinate,
+            symbolName: frame.symbolName,
+            timeText: String(format: "%02d:%02d", components.hour ?? 0, components.minute ?? 0),
+            markerColor: markerColor,
+            isStop: frame.isStop,
+            isMarkerHidden: frame.isStop && (isDayPlaybackFramingStop || isDayPlaybackRecentering),
+            travelsWest: frame.travelsWest,
+            highlightedSegments: dayPlaybackHighlightedSegments
+        )
     }
     
     private var mapPoints: [CLLocationCoordinate2D] {
@@ -379,7 +466,7 @@ struct TimelineScene<Content: View>: View {
         DFKMapView(
             cameraPosition: $cameraPosition,
             isInteractive: true,
-            showsUserLocation: selectedFootprint == nil,
+            showsUserLocation: selectedFootprint == nil && dayPlaybackDate == nil,
             points: mapPoints,
             timelineItems: mapTimelineItems,
             photoAssets: [],
@@ -387,9 +474,32 @@ struct TimelineScene<Content: View>: View {
             prefersActivityIcons: mapPrefersActivityIcons,
             selectedFootprintID: selectedFootprint?.footprintID,
             selectedFootprintCoordinate: selectedFootprintMapCoordinate,
+            playbackOverlay: dayPlaybackOverlay,
+            centersPlaybackMarkerOnScreen: followsDayPlayback &&
+                !isTouchingDayPlaybackMap &&
+                !isDayPlaybackRecentering,
             timelineUpdateIdentifier: mapViewportRevision,
-            onMapInteraction: handleMapInteraction,
+            onMapInteraction: { interaction in
+                if dayPlaybackDate == nil { handleMapInteraction(interaction) }
+            },
+            onMapTouchChanged: handleDayPlaybackMapTouch,
+            onCameraChanged: { camera, region in
+                if dayPlaybackDate != nil {
+                    dayPlaybackVisibleCamera = camera
+                    displayedMapRegion = region
+                    completeDayPlaybackRecenterIfNeeded(at: camera.centerCoordinate)
+                }
+            },
+            onCameraChanging: { camera, region in
+                if dayPlaybackDate != nil,
+                   isTouchingDayPlaybackMap || isDayPlaybackRecentering {
+                    dayPlaybackVisibleCamera = camera
+                    displayedMapRegion = region
+                    completeDayPlaybackRecenterIfNeeded(at: camera.centerCoordinate)
+                }
+            },
             onTimelineItemTap: { item in
+                guard dayPlaybackDate == nil else { return }
                 onRequestRecords()
                 withAnimation(.spring(response: 0.35, dampingFraction: 1.0)) {
                     switch item {
@@ -406,6 +516,7 @@ struct TimelineScene<Content: View>: View {
                 }
             },
             onAggregatedFootprintTap: { aggregated in
+                guard dayPlaybackDate == nil else { return }
                 onRequestRecords()
                 if timelineDetentBeforeFootprintDetail == nil {
                     timelineDetentBeforeFootprintDetail = mapTapDetentBeforeCollapse ?? timelineDetent
@@ -454,6 +565,557 @@ struct TimelineScene<Content: View>: View {
         }
     }
 
+    private func startDayPlayback(for date: Date, preservingPlaybackSession: Bool = false) {
+        let replacesActivePlayback = preservingPlaybackSession && dayPlaybackDate != nil
+        dayPlaybackPreparationTask?.cancel()
+        dayPlaybackPreparationTask = nil
+        dayPlaybackScrubFrameTask?.cancel()
+        dayPlaybackScrubFrameTask = nil
+        isPreparingDayPlayback = false
+        if replacesActivePlayback {
+            // Stop the old renderer before any work for the next date begins.
+            // Publishing new overlays while the previous camera task is still
+            // mutating MapKit can trip VectorKit's internal drawing assertions.
+            isDayPlaybackPaused = true
+            dayPlaybackRevision &+= 1
+            clearDayPlaybackControlScrubCameraWork()
+        }
+        if !replacesActivePlayback, dayPlaybackDate != nil {
+            stopDayPlayback()
+        }
+        let normalizedDate = Calendar.current.startOfDay(for: date)
+        let items = timelinesByDate[normalizedDate]?.items.sorted { $0.startTime < $1.startTime } ?? []
+        let transports = items.compactMap { item -> Transport? in
+            guard case .transport(let transport) = item else { return nil }
+            return transport
+        }
+        guard !transports.isEmpty else {
+            if replacesActivePlayback {
+                stopDayPlayback(restoresActiveDate: false)
+                refreshVisibleTimelineMap(for: [normalizedDate], delayNanoseconds: 0)
+            }
+            return
+        }
+
+        let inputs = items.map { item -> DayRoutePlaybackInput in
+            switch item {
+            case .footprint(let footprint):
+                let activity = footprint.getActivityType(from: allActivities)
+                return DayRoutePlaybackInput(
+                    kind: .footprint(
+                        latitudeData: footprint.latitudeData,
+                        longitudeData: footprint.longitudeData,
+                        startTime: footprint.startTime,
+                        endTime: footprint.endTime,
+                        symbolName: activity?.icon ?? "mappin",
+                        colorHex: activity?.colorHex
+                    ),
+                    startTime: footprint.startTime
+                )
+            case .transport(let transport):
+                return DayRoutePlaybackInput(
+                    kind: .transport(transport),
+                    startTime: transport.startTime
+                )
+            }
+        }
+
+        isPreparingDayPlayback = true
+        dayPlaybackPreparationTask = Task { @MainActor in
+            await TransportRouteCompletion.prepare(transports, activelyRequested: true)
+            guard !Task.isCancelled else { return }
+            let buildTask = Task.detached(priority: .userInitiated) {
+                DayRoutePlayback.make(inputs: inputs)
+            }
+            let prepared = await withTaskCancellationHandler {
+                await buildTask.value
+            } onCancel: {
+                buildTask.cancel()
+            }
+            guard !Task.isCancelled else { return }
+            guard !prepared.frames.isEmpty else {
+                isPreparingDayPlayback = false
+                if replacesActivePlayback {
+                    stopDayPlayback(restoresActiveDate: false)
+                    refreshVisibleTimelineMap(for: [normalizedDate], delayNanoseconds: 0)
+                }
+                return
+            }
+
+            if !replacesActivePlayback {
+                timelineDetentBeforeDayPlayback = timelineDetent
+                cameraPositionBeforeDayPlayback = cameraPosition
+                visibleTimelineItemsBeforeDayPlayback = visibleTimelineItems
+                mapInteractionLockBeforeDayPlayback = mapInteractionLockedVisibleDates
+                activeTimelineDateBeforeDayPlayback = activeTimelineDate
+            }
+            // Cancel and clear every old-date mutation before publishing the
+            // replacement snapshot as one coherent map update.
+            dayPlaybackScrubFrameTask?.cancel()
+            dayPlaybackScrubFrameTask = nil
+            clearDayPlaybackControlScrubCameraWork()
+            dayPlaybackVisibleCamera = cameraPosition.camera
+            dayPlayback = prepared
+            dayPlaybackItems = items
+            dayPlaybackDate = normalizedDate
+            activeTimelineDate = normalizedDate
+            dayPlaybackFrameIndex = 0
+            requestedDayPlaybackFrameIndex = 0
+            dayPlaybackHighlightedSegments = []
+            dayPlaybackFramedRouteIndex = nil
+            dayPlaybackFramedStopIndex = nil
+            dayPlaybackStopFollowRegion = nil
+            dayPlaybackTransportFollowRegion = nil
+            isDayPlaybackFramingRoute = false
+            // Publish an initially hidden stop marker before the first frame's
+            // asynchronous geometry work yields to rendering.
+            isDayPlaybackFramingStop = prepared.frames[0].isStop
+            dayPlaybackWasRunningBeforeStopFraming = false
+            dayPlaybackWasRunningBeforeRouteFraming = false
+            dayPlaybackRouteFramingTask?.cancel()
+            dayPlaybackRouteFramingTask = nil
+            dayPlaybackStopFramingTask?.cancel()
+            dayPlaybackStopFramingTask = nil
+            isDayPlaybackCoveredByUI = isCoveringDayPlaybackUI
+            isDayPlaybackPaused = false
+            isDayPlaybackControlScrubbing = false
+            dayPlaybackRevision &+= 1
+            mapInteractionLockedVisibleDates = [normalizedDate]
+            visibleTimelineItems = items
+            if !isSideBySide {
+                timelineDetent = .height(collapsedTimelineDetentHeight)
+            }
+            isPreparingDayPlayback = false
+            await setDayPlaybackFrame(0)
+        }
+    }
+
+    private func stopDayPlayback(
+        restoresActiveDate: Bool = true,
+        restoresTimelineDetent: Bool = true
+    ) {
+        dayPlaybackPreparationTask?.cancel()
+        dayPlaybackPreparationTask = nil
+        dayPlaybackScrubFrameTask?.cancel()
+        dayPlaybackScrubFrameTask = nil
+        isPreparingDayPlayback = false
+        guard dayPlaybackDate != nil else { return }
+
+        let previousDetent = timelineDetentBeforeDayPlayback
+        let previousCamera = cameraPositionBeforeDayPlayback
+        let previousVisibleItems = visibleTimelineItemsBeforeDayPlayback
+        let previousMapLock = mapInteractionLockBeforeDayPlayback
+        let previousActiveDate = activeTimelineDateBeforeDayPlayback
+        let reloadDeferredTimelineData = dayPlaybackDefersTimelineReload
+        dayPlayback = .empty
+        dayPlaybackItems = []
+        dayPlaybackDate = nil
+        dayPlaybackFrameIndex = 0
+        requestedDayPlaybackFrameIndex = 0
+        dayPlaybackHighlightedSegments = []
+        isDayPlaybackPaused = false
+        isDayPlaybackControlScrubbing = false
+        dayPlaybackWasRunningBeforeTouch = false
+        isTouchingDayPlaybackMap = false
+        isDayPlaybackRecentering = false
+        isDayPlaybackFramingRoute = false
+        dayPlaybackFramedRouteIndex = nil
+        dayPlaybackWasRunningBeforeRouteFraming = false
+        dayPlaybackRouteFramingTask?.cancel()
+        dayPlaybackRouteFramingTask = nil
+        isDayPlaybackFramingStop = false
+        dayPlaybackFramedStopIndex = nil
+        dayPlaybackStopFollowRegion = nil
+        dayPlaybackTransportFollowRegion = nil
+        dayPlaybackWasRunningBeforeStopFraming = false
+        dayPlaybackStopFramingTask?.cancel()
+        dayPlaybackStopFramingTask = nil
+        isDayPlaybackCoveredByUI = false
+        dayPlaybackDefersTimelineReload = false
+        dayPlaybackVisibleCamera = nil
+        timelineDetentBeforeDayPlayback = nil
+        cameraPositionBeforeDayPlayback = nil
+        visibleTimelineItemsBeforeDayPlayback = []
+        mapInteractionLockBeforeDayPlayback = nil
+        activeTimelineDateBeforeDayPlayback = nil
+        visibleTimelineItems = previousVisibleItems
+        mapInteractionLockedVisibleDates = previousMapLock
+        if restoresActiveDate, let previousActiveDate {
+            activeTimelineDate = previousActiveDate
+        }
+        if restoresTimelineDetent, let previousDetent, !isSideBySide {
+            timelineDetent = previousDetent
+        }
+        if let previousCamera {
+            if let previousRegion = previousCamera.region {
+                moveMapCamera(to: previousRegion, animated: true)
+            } else {
+                withAnimation(.easeInOut(duration: 0.35)) {
+                    cameraPosition = previousCamera
+                }
+            }
+        }
+        if reloadDeferredTimelineData {
+            scheduleTimelineReloadAfterDataChange()
+        }
+    }
+
+    private func setDayPlaybackFrame(
+        _ index: Int,
+        framesSegmentCamera: Bool = true
+    ) async {
+        guard !Task.isCancelled,
+              dayPlayback.frames.indices.contains(index) else { return }
+        requestedDayPlaybackFrameIndex = index
+        let playback = dayPlayback
+        let revision = dayPlaybackRevision
+        let highlighted = await Task.detached(priority: .userInitiated) {
+            playback.highlightedSegments(at: index)
+        }.value
+        guard !Task.isCancelled,
+              revision == dayPlaybackRevision,
+              requestedDayPlaybackFrameIndex == index,
+              dayPlayback.frames.indices.contains(index) else { return }
+        let frame = dayPlayback.frames[index]
+        if !frame.isStop {
+            dayPlaybackFramedStopIndex = nil
+            dayPlaybackStopFollowRegion = nil
+        } else {
+            dayPlaybackFramedRouteIndex = nil
+            dayPlaybackTransportFollowRegion = nil
+        }
+        let routeIndexToFrame = frame.activeRouteIndex.flatMap { routeIndex in
+            routeIndex == dayPlaybackFramedRouteIndex ? nil : routeIndex
+        }
+        let stopIndexToFrame = frame.stopIndex.flatMap { stopIndex in
+            stopIndex == dayPlaybackFramedStopIndex ? nil : stopIndex
+        }
+        if framesSegmentCamera, let stopIndexToFrame {
+            // Enter the stop-camera state before publishing the stop frame so
+            // its very first render is hidden instead of flashing for one pass.
+            frameDayPlaybackStop(stopIndexToFrame, coordinate: frame.coordinate)
+        }
+        var transaction = Transaction(animation: nil)
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            dayPlaybackFrameIndex = index
+            dayPlaybackHighlightedSegments = highlighted
+            if !framesSegmentCamera {
+                centerDayPlaybackCamera(frameIndex: index)
+            } else if routeIndexToFrame == nil,
+                      stopIndexToFrame == nil,
+                      !isDayPlaybackFramingStop {
+                centerDayPlaybackCamera(frameIndex: index)
+            }
+        }
+        if !framesSegmentCamera {
+            return
+        } else if let routeIndexToFrame {
+            frameDayPlaybackRoute(routeIndexToFrame)
+        }
+    }
+
+    private func dayPlaybackCameraLayout() -> (viewport: CGSize, visibleRect: CGRect)? {
+        let viewport = mapViewportSize
+        guard viewport.width > 1, viewport.height > 1 else { return nil }
+        let leadingInset = viewport.width * 0.08
+        let trailingInset = isSideBySide
+            ? max(
+                viewport.width * 0.08,
+                dayPlaybackControlSize.width + max(40, currentTrailingSafeAreaInset + 32)
+            )
+            : leadingInset
+        let topInset = viewport.height * 0.10
+        let controlHeight = max(dayPlaybackControlSize.height, 48)
+        let bottomInset = isSideBySide
+            ? 48
+            : collapsedTimelineDetentHeight + nativeTabBarHeight + 32 + controlHeight + 16
+        let visibleHeight = max(viewport.height - topInset - bottomInset, viewport.height * 0.25)
+        return (
+            viewport,
+            CGRect(
+                x: leadingInset,
+                y: topInset,
+                width: viewport.width - leadingInset - trailingInset,
+                height: visibleHeight
+            )
+        )
+    }
+
+    private func frameDayPlaybackRoute(_ routeIndex: Int) {
+        let resumesPlaybackAfterFraming = !isDayPlaybackPaused
+        dayPlaybackFramedRouteIndex = routeIndex
+        dayPlaybackStopFollowRegion = nil
+        dayPlaybackTransportFollowRegion = nil
+        guard dayPlayback.routeGeometries.indices.contains(routeIndex) else { return }
+        let coordinates = dayPlayback.routeGeometries[routeIndex].coordinates
+        guard coordinates.count >= 2, let cameraLayout = dayPlaybackCameraLayout() else { return }
+        dayPlaybackStopFramingTask?.cancel()
+        dayPlaybackStopFramingTask = nil
+        isDayPlaybackFramingStop = false
+        dayPlaybackWasRunningBeforeStopFraming = false
+        dayPlaybackWasRunningBeforeRouteFraming = resumesPlaybackAfterFraming
+        isDayPlaybackFramingRoute = true
+        dayPlaybackRouteFramingTask?.cancel()
+        dayPlaybackRouteFramingTask = Task { @MainActor in
+            let targetRegion = await Task.detached(priority: .userInitiated) {
+                FootprintCameraFraming.mapRect(
+                    coordinates: coordinates,
+                    viewport: cameraLayout.viewport,
+                    visibleRect: cameraLayout.visibleRect
+                ).map { MKCoordinateRegion($0) }
+            }.value
+            guard !Task.isCancelled,
+                  dayPlaybackDate != nil,
+                  dayPlaybackFramedRouteIndex == routeIndex else { return }
+            guard let targetRegion, isRenderableMapRegion(targetRegion) else {
+                isDayPlaybackFramingRoute = false
+                completeDayPlaybackRouteFraming()
+                return
+            }
+            var transportRegion = targetRegion
+            let cameraSpanRatio = AppConfig.shared.dayRoutePlaybackTransportCameraSpanRatio
+            transportRegion.span = MKCoordinateSpan(
+                latitudeDelta: targetRegion.span.latitudeDelta * cameraSpanRatio,
+                longitudeDelta: targetRegion.span.longitudeDelta * cameraSpanRatio
+            )
+            if followsDayPlayback,
+               dayPlayback.frames.indices.contains(dayPlaybackFrameIndex) {
+                transportRegion.center = dayPlayback.frames[dayPlaybackFrameIndex].coordinate
+                dayPlaybackTransportFollowRegion = transportRegion
+            } else {
+                dayPlaybackTransportFollowRegion = nil
+            }
+            let transitionDuration = moveMapCamera(
+                to: transportRegion,
+                animated: true
+            )
+            await waitForMapCameraTransition(fallbackDuration: transitionDuration)
+            guard !Task.isCancelled,
+                  dayPlaybackDate != nil,
+                  dayPlaybackFramedRouteIndex == routeIndex else { return }
+            dayPlaybackVisibleCamera = nil
+            isDayPlaybackFramingRoute = false
+            completeDayPlaybackRouteFraming()
+        }
+    }
+
+    private func frameDayPlaybackStop(_ stopIndex: Int, coordinate: CLLocationCoordinate2D) {
+        let resumesPlaybackAfterFraming = !isDayPlaybackPaused
+        dayPlaybackFramedStopIndex = stopIndex
+        guard let cameraLayout = dayPlaybackCameraLayout() else {
+            isDayPlaybackFramingStop = false
+            return
+        }
+        let viewport = cameraLayout.viewport
+        let streetLevelVisibleRect = CGRect(
+            x: viewport.width * 0.08,
+            y: viewport.height * 0.10,
+            width: viewport.width * 0.84,
+            height: viewport.height * 0.80
+        )
+        dayPlaybackRouteFramingTask?.cancel()
+        dayPlaybackRouteFramingTask = nil
+        isDayPlaybackFramingRoute = false
+        dayPlaybackWasRunningBeforeRouteFraming = false
+        dayPlaybackWasRunningBeforeStopFraming = resumesPlaybackAfterFraming
+        isDayPlaybackFramingStop = true
+        dayPlaybackStopFramingTask?.cancel()
+        dayPlaybackStopFramingTask = Task { @MainActor in
+            let targetRegion = await Task.detached(priority: .userInitiated) {
+                FootprintCameraFraming.mapRect(
+                    coordinates: [coordinate],
+                    viewport: viewport,
+                    visibleRect: streetLevelVisibleRect
+                ).map { MKCoordinateRegion($0) }
+            }.value
+            guard !Task.isCancelled,
+                  dayPlaybackDate != nil,
+                  dayPlaybackFramedStopIndex == stopIndex else { return }
+            guard let targetRegion, isRenderableMapRegion(targetRegion) else {
+                isDayPlaybackFramingStop = false
+                dayPlaybackStopFollowRegion = nil
+                completeDayPlaybackStopFraming()
+                return
+            }
+            let stopCameraSpanRatio = AppConfig.shared.dayRoutePlaybackStopCameraSpanRatio
+            var stopRegion = targetRegion
+            stopRegion.span = MKCoordinateSpan(
+                latitudeDelta: targetRegion.span.latitudeDelta * stopCameraSpanRatio,
+                longitudeDelta: targetRegion.span.longitudeDelta * stopCameraSpanRatio
+            )
+            dayPlaybackStopFollowRegion = stopRegion
+            let transitionDuration = moveMapCamera(
+                to: stopRegion,
+                animated: true
+            )
+            await waitForMapCameraTransition(fallbackDuration: transitionDuration)
+            guard !Task.isCancelled,
+                  dayPlaybackFramedStopIndex == stopIndex else { return }
+            dayPlaybackVisibleCamera = nil
+            isDayPlaybackFramingStop = false
+            completeDayPlaybackStopFraming()
+        }
+    }
+
+    private func completeDayPlaybackStopFraming() {
+        dayPlaybackWasRunningBeforeStopFraming = false
+    }
+
+    private func waitForMapCameraTransition(fallbackDuration: TimeInterval) async {
+        if let transitionTask = mapCameraTransitionTask {
+            await transitionTask.value
+        } else if fallbackDuration > 0 {
+            try? await Task.sleep(for: .seconds(fallbackDuration))
+        }
+    }
+
+    private func handleDayPlaybackCoverChange(_ isCovered: Bool) {
+        guard dayPlaybackDate != nil, isCovered != isDayPlaybackCoveredByUI else { return }
+        isDayPlaybackCoveredByUI = isCovered
+        if isCovered {
+            mapCameraTransitionTask?.cancel()
+            dayPlaybackRouteFramingTask?.cancel()
+            dayPlaybackRouteFramingTask = nil
+            dayPlaybackStopFramingTask?.cancel()
+            dayPlaybackStopFramingTask = nil
+            isDayPlaybackFramingRoute = false
+            isDayPlaybackFramingStop = false
+            isDayPlaybackRecentering = false
+            dayPlaybackWasRunningBeforeRouteFraming = false
+            dayPlaybackWasRunningBeforeStopFraming = false
+            dayPlaybackWasRunningBeforeTouch = false
+        } else {
+        }
+    }
+
+    private func completeDayPlaybackRouteFraming() {
+        dayPlaybackWasRunningBeforeRouteFraming = false
+    }
+
+    @discardableResult
+    private func centerDayPlaybackCamera(
+        frameIndex: Int? = nil,
+        preferredRegion: MKCoordinateRegion? = nil
+    ) -> Bool {
+        guard followsDayPlayback else { return false }
+        let index = frameIndex ?? dayPlaybackFrameIndex
+        guard dayPlayback.frames.indices.contains(index) else { return false }
+        let frame = dayPlayback.frames[index]
+        let coordinate = frame.coordinate
+        let lockedStopRegion = frame.isStop ? dayPlaybackStopFollowRegion : nil
+        let lockedTransportRegion = frame.isStop ? nil : dayPlaybackTransportFollowRegion
+        if var region = preferredRegion ?? lockedStopRegion ?? lockedTransportRegion {
+            region.center = coordinate
+            cameraPosition = .region(region)
+            return true
+        } else if let camera = dayPlaybackVisibleCamera ?? cameraPosition.camera {
+            cameraPosition = .camera(MapCamera(
+                centerCoordinate: coordinate,
+                distance: camera.distance,
+                heading: camera.heading,
+                pitch: camera.pitch
+            ))
+            return true
+        } else if var region = displayedMapRegion ?? renderedMapRegion ?? cameraPosition.region {
+            region.center = coordinate
+            cameraPosition = .region(region)
+            return true
+        }
+        return false
+    }
+
+    @discardableResult
+    private func animateDayPlaybackCameraToCurrentFrame() -> Bool {
+        guard followsDayPlayback,
+              dayPlayback.frames.indices.contains(dayPlaybackFrameIndex) else { return false }
+        let frame = dayPlayback.frames[dayPlaybackFrameIndex]
+        if var region = frame.isStop ? dayPlaybackStopFollowRegion : nil {
+            region.center = frame.coordinate
+            moveMapCamera(to: region, animated: true)
+            return true
+        }
+        if var region = displayedMapRegion ?? renderedMapRegion ?? cameraPosition.region {
+            region.center = frame.coordinate
+            moveMapCamera(to: region, animated: true)
+            return true
+        }
+        if let camera = dayPlaybackVisibleCamera ?? cameraPosition.camera {
+            withAnimation(.easeInOut(duration: 0.35)) {
+                cameraPosition = .camera(MapCamera(
+                    centerCoordinate: frame.coordinate,
+                    distance: camera.distance,
+                    heading: camera.heading,
+                    pitch: camera.pitch
+                ))
+            }
+            return true
+        }
+        return false
+    }
+
+    private func handleDayPlaybackMapTouch(_ isTouching: Bool) {
+        guard dayPlaybackDate != nil, followsDayPlayback else { return }
+        if isTouching {
+            guard !isTouchingDayPlaybackMap else { return }
+            isTouchingDayPlaybackMap = true
+            isDayPlaybackRecentering = false
+            dayPlaybackStopFollowRegion = nil
+            dayPlaybackTransportFollowRegion = nil
+            if isDayPlaybackFramingRoute {
+                dayPlaybackWasRunningBeforeTouch = dayPlaybackWasRunningBeforeRouteFraming
+            } else if isDayPlaybackFramingStop {
+                dayPlaybackWasRunningBeforeTouch = dayPlaybackWasRunningBeforeStopFraming
+            } else {
+                dayPlaybackWasRunningBeforeTouch = !isDayPlaybackPaused
+            }
+            if isDayPlaybackFramingRoute {
+                dayPlaybackRouteFramingTask?.cancel()
+                dayPlaybackRouteFramingTask = nil
+                mapCameraTransitionTask?.cancel()
+                isDayPlaybackFramingRoute = false
+                dayPlaybackWasRunningBeforeRouteFraming = false
+            }
+            if isDayPlaybackFramingStop {
+                dayPlaybackStopFramingTask?.cancel()
+                dayPlaybackStopFramingTask = nil
+                mapCameraTransitionTask?.cancel()
+                isDayPlaybackFramingStop = false
+                dayPlaybackWasRunningBeforeStopFraming = false
+            }
+        } else {
+            Task { @MainActor in
+                try? await Task.sleep(for: .milliseconds(80))
+                guard isTouchingDayPlaybackMap else { return }
+                isTouchingDayPlaybackMap = false
+                isDayPlaybackRecentering = true
+                if !animateDayPlaybackCameraToCurrentFrame() {
+                    completeDayPlaybackRecenter()
+                }
+            }
+        }
+    }
+
+    private func completeDayPlaybackRecenterIfNeeded(at center: CLLocationCoordinate2D) {
+        guard isDayPlaybackRecentering,
+              dayPlayback.frames.indices.contains(dayPlaybackFrameIndex) else { return }
+        let target = dayPlayback.frames[dayPlaybackFrameIndex].coordinate
+        let distance = CLLocation(latitude: center.latitude, longitude: center.longitude)
+            .distance(from: CLLocation(latitude: target.latitude, longitude: target.longitude))
+        guard distance < 0.5 else { return }
+        completeDayPlaybackRecenter()
+    }
+
+    private func completeDayPlaybackRecenter() {
+        var transaction = Transaction(animation: nil)
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            isDayPlaybackRecentering = false
+            dayPlaybackWasRunningBeforeTouch = false
+            dayPlaybackWasRunningBeforeRouteFraming = false
+        }
+    }
+
     @ViewBuilder
     private var timelineNavigationContent: some View {
         TimelineView(
@@ -484,6 +1146,12 @@ struct TimelineScene<Content: View>: View {
             availableDates: loadableTimelineDateIndex,
             visibleDatesChanged: updateVisibleTimelineDates,
             visibleItemIDsChanged: updateVisibleTimelineItemIDs,
+            onPlayDay: { date in
+                startDayPlayback(for: date)
+            },
+            onCoveringPresentationChanged: { isPresented in
+                timelineHasCoveringPresentation = isPresented
+            },
             isActive: isActive,
             selectedMapPhotoAssetID: $selectedMapPhotoAssetID
         )
@@ -497,100 +1165,308 @@ struct TimelineScene<Content: View>: View {
     @ViewBuilder
     private var timelineMainContent: some View {
         GeometryReader { geometry in
-            mapContent
-            .onAppear {
-                updateMapViewportSize(geometry.size)
+            ZStack(alignment: .bottom) {
+                mapContent
+                if isPreparingDayPlayback {
+                    ProgressView("正在准备全天轨迹…")
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 12)
+                        .background(.regularMaterial, in: Capsule())
+                        .frame(maxHeight: .infinity, alignment: .center)
+                }
+                if dayPlaybackDate != nil {
+                    dayPlaybackControls
+                        .background {
+                            GeometryReader { controlGeometry in
+                                Color.clear
+                                    .onAppear {
+                                        dayPlaybackControlSize = controlGeometry.size
+                                    }
+                                    .onChange(of: controlGeometry.size) { _, newSize in
+                                        dayPlaybackControlSize = newSize
+                                    }
+                            }
+                        }
+                        .padding(.leading, 20)
+                        .padding(
+                            .trailing,
+                            isSideBySide ? max(20, currentTrailingSafeAreaInset + 12) : 20
+                        )
+                        .padding(.bottom, isSideBySide ? 0 : collapsedTimelineDetentHeight + nativeTabBarHeight + 32)
+                        .frame(
+                            maxWidth: .infinity,
+                            maxHeight: .infinity,
+                            alignment: isSideBySide ? .trailing : .bottom
+                        )
+                }
             }
-            .onChange(of: geometry.size) { _, newSize in
-                updateMapViewportSize(newSize)
-            }
+            .onAppear { updateMapViewportSize(geometry.size) }
+            .onChange(of: geometry.size) { _, newSize in updateMapViewportSize(newSize) }
         }
         .ignoresSafeArea(edges: isSideBySide ? [.top, .bottom, .trailing] : .all)
     }
 
-    var body: some View {
-        content(AnyView(timelineMainContent), AnyView(timelineNavigationContent))
-        .onChange(of: destination?.id) { _, _ in consumeDestination() }
-        .onChange(of: returnToNowRequest) { _, _ in returnToNow() }
-        .onChange(of: hasCompletedInitialTimelineLoad) { _, ready in
-            if ready { consumeDestination() }
-        }
-        .onAppear {
-            handleTimelineAppear()
-            consumeDestination()
-        }
-        .onDisappear(perform: handleTimelineDisappear)
-        .task { await loadInitialTimeline() }
-        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("FootprintDataChanged")), perform: handleFootprintDataChanged)
-        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("DFKDeepLinkNotification"))) { notification in
-            handleDeepLink(userInfo: notification.userInfo)
-        }
-        .onChange(of: selectedFootprint?.footprintID) { _, _ in
-            handleSelectedFootprintChange(selectedFootprint)
-        }
-        .task(id: footprintCameraSourceKey) {
-            await loadSelectedFootprintCameraCoordinates()
-        }
-        .onChange(of: allPlaces) { _, newValue in
-            locationManager.allPlaces = newValue
-            locationManager.forceRefreshOngoingAnalysis()
-        }
-        .onChange(of: timelineDetent) { oldValue, newValue in
-            handleTimelineDetentChange(oldValue: oldValue, newValue: newValue)
-        }
-        .onChange(of: isCalendarScrollLocked) { _, isLocked in
-            if isLocked {
-                visibleMapUpdateTask?.cancel()
-                if selectedFootprint == nil {
-                    mapCameraTransitionTask?.cancel()
-                    if let displayedMapRegion {
-                        renderedMapRegion = displayedMapRegion
+    private var dayPlaybackProgress: Binding<Double> {
+        Binding(
+            get: {
+                guard dayPlayback.frames.count >= 2 else { return 0 }
+                return Double(dayPlaybackFrameIndex) / Double(dayPlayback.frames.count - 1)
+            },
+            set: { progress in
+                guard dayPlayback.frames.count >= 2 else { return }
+                let bounded = min(max(progress, 0), 1)
+                let index = Int((bounded * Double(dayPlayback.frames.count - 1)).rounded())
+                dayPlaybackScrubFrameTask?.cancel()
+                dayPlaybackScrubFrameTask = Task { @MainActor in
+                    await setDayPlaybackFrame(index, framesSegmentCamera: false)
+                }
+            }
+        )
+    }
+
+    private func clearDayPlaybackControlScrubCameraWork() {
+        // Scrubbing can cross several route/stay boundaries in one gesture.
+        // Camera transitions belong to automatic playback, not manual seeking;
+        // none may survive into or out of the slider gesture and block the
+        // pause state restored by the shared scrubber.
+        dayPlaybackRouteFramingTask?.cancel()
+        dayPlaybackRouteFramingTask = nil
+        dayPlaybackStopFramingTask?.cancel()
+        dayPlaybackStopFramingTask = nil
+        mapCameraTransitionTask?.cancel()
+        mapCameraTransitionTask = nil
+        isDayPlaybackFramingRoute = false
+        isDayPlaybackFramingStop = false
+        isTouchingDayPlaybackMap = false
+        isDayPlaybackRecentering = false
+        dayPlaybackWasRunningBeforeRouteFraming = false
+        dayPlaybackWasRunningBeforeStopFraming = false
+        dayPlaybackWasRunningBeforeTouch = false
+    }
+
+    private var dayPlaybackFollowButton: some View {
+        Button {
+            followsDayPlayback.toggle()
+            if followsDayPlayback {
+                if !isDayPlaybackFramingRoute && !isDayPlaybackFramingStop {
+                    isDayPlaybackRecentering = true
+                    if !animateDayPlaybackCameraToCurrentFrame() {
+                        completeDayPlaybackRecenter()
                     }
                 }
-                return
+            } else if isDayPlaybackRecentering {
+                completeDayPlaybackRecenter()
             }
-            // An explicit date jump has already finished positioning the
-            // timeline. Start its camera animation in the same run-loop turn;
-            // manual scrolling still uses the geometry coalescer below.
-            refreshVisibleTimelineMap(for: visibleTimelineDates, delayNanoseconds: 0)
+        } label: {
+            Image(systemName: "plus.viewfinder")
+                .font(.system(size: 14, weight: .bold))
+                .foregroundStyle(followsDayPlayback ? Color.white : Color.dfkAccent)
+                .frame(width: 32, height: 32)
+                .background(
+                    Circle().fill(
+                        followsDayPlayback ? Color.dfkAccent : Color.secondary.opacity(0.12)
+                    )
+                )
+                .overlay(
+                    Circle().stroke(
+                        Color.dfkAccent.opacity(followsDayPlayback ? 0 : 0.45),
+                        lineWidth: 1
+                    )
+                )
         }
-        .onChange(of: cameraPosition.followsUserLocation) { _, isFollowing in
-            guard isFollowing else { return }
-            // A pending timeline fit must not overwrite an explicit locate request.
-            visibleMapUpdateTask?.cancel()
-            mapCameraTransitionTask?.cancel()
-            if !isSideBySide, timelineDetent == .medium {
-                focusMapOnCurrentLocation()
+        .buttonStyle(.plain)
+        .accessibilityLabel(followsDayPlayback ? "关闭镜头跟随" : "开启镜头跟随")
+    }
+
+    private func dayPlaybackScrubber(axis: Axis) -> some View {
+        TimelinePlaybackScrubber(
+            progress: dayPlaybackProgress,
+            isPaused: $isDayPlaybackPaused,
+            isScrubbing: $isDayPlaybackControlScrubbing,
+            axis: axis,
+            progressAccessibilityLabel: "全天轨迹播放进度",
+            resumeAccessibilityLabel: "继续全天轨迹",
+            pauseAccessibilityLabel: "暂停全天轨迹",
+            onEditingChanged: { _ in
+                clearDayPlaybackControlScrubCameraWork()
+            }
+        )
+    }
+
+    private var dayPlaybackCloseButton: some View {
+        Button {
+            stopDayPlayback()
+        } label: {
+            Image(systemName: "xmark")
+                .font(.system(size: 14, weight: .bold))
+                .frame(width: 24, height: 24)
+        }
+        .buttonStyle(.bordered)
+        .buttonBorderShape(.circle)
+        .tint(.secondary)
+        .accessibilityLabel("关闭全天轨迹播放")
+    }
+
+    @ViewBuilder
+    private var dayPlaybackControls: some View {
+        Group {
+            if isSideBySide {
+                VStack(spacing: 12) {
+                    dayPlaybackFollowButton
+                    dayPlaybackScrubber(axis: .vertical)
+                    dayPlaybackCloseButton
+                }
             } else {
-                renderedMapRegion = nil
-                displayedMapRegion = nil
+                HStack(spacing: 12) {
+                    dayPlaybackFollowButton
+                    dayPlaybackScrubber(axis: .horizontal)
+                    dayPlaybackCloseButton
+                }
             }
         }
-        .onChange(of: locationManager.lastLocation?.timestamp) { _, _ in
-            guard visibleTimelineItems.isEmpty else { return }
-            refreshVisibleTimelineMap(delayNanoseconds: 0)
-        }
-        .onChange(of: locationManager.authStatus) { _, _ in
-            scheduleLocationSettingsAlertIfNeeded()
-        }
-        .onChange(of: isTrackingEnabled) { _, _ in
-            scheduleLocationSettingsAlertIfNeeded()
-        }
-        .onChange(of: scenePhase) { _, phase in
-            guard phase == .active else { return }
-            locationManager.refreshAuthorizationStatus()
-            scheduleLocationSettingsAlertIfNeeded()
-            Task { await refreshTimelineForCurrentDayIfNeeded() }
-        }
-        .onOpenURL(perform: handleDeepLinkURL)
-        .alert("确认已到达？", isPresented: $showingArrivalConfirmation) {
-            Button("取消", role: .cancel) { }
-            Button("确认到达") {
-                Task { await locationManager.confirmArrival() }
-            }
-        } message: {
-            Text("将结束当前移动，并开始记录停留。")
-        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 8)
+        .dfkDetailMaterial(in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .shadow(color: .black.opacity(0.08), radius: 6, y: 2)
+    }
+
+    var body: some View {
+        timelineSceneSystemEvents
+    }
+
+    private var timelineSceneLifecycle: AnyView {
+        AnyView(
+            content(AnyView(timelineMainContent), AnyView(timelineNavigationContent))
+                .onChange(of: destination?.id) { _, _ in consumeDestination() }
+                .onChange(of: returnToNowRequest) { _, _ in returnToNow() }
+                .onChange(of: hasCompletedInitialTimelineLoad) { _, ready in
+                    if ready { consumeDestination() }
+                }
+                .onAppear {
+                    handleTimelineAppear()
+                    consumeDestination()
+                }
+                .onDisappear(perform: handleTimelineDisappear)
+                .task { await loadInitialTimeline() }
+        )
+    }
+
+    private var timelineScenePlaybackEvents: AnyView {
+        AnyView(
+            timelineSceneLifecycle
+                .task(id: "\(dayPlaybackRevision)-\(canAdvanceDayPlayback)") {
+                    guard canAdvanceDayPlayback,
+                          dayPlayback.frames.count >= 2 else { return }
+                    while !Task.isCancelled {
+                        let isAtEnd = dayPlaybackFrameIndex == dayPlayback.frames.count - 1
+                        let delay = isAtEnd ? dayPlayback.endPause : dayPlayback.frameInterval
+                        try? await Task.sleep(for: .seconds(delay))
+                        guard !Task.isCancelled, canAdvanceDayPlayback else { return }
+                        if isAtEnd {
+                            dayPlaybackFramedRouteIndex = nil
+                            dayPlaybackFramedStopIndex = nil
+                        }
+                        let nextIndex = isAtEnd ? 0 : dayPlaybackFrameIndex + 1
+                        await setDayPlaybackFrame(nextIndex)
+                    }
+                }
+                .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("FootprintDataChanged")), perform: handleFootprintDataChanged)
+                .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("DFKDeepLinkNotification"))) { notification in
+                    handleDeepLink(userInfo: notification.userInfo)
+                }
+                .onChange(of: selectedFootprint?.footprintID) { _, _ in
+                    if selectedFootprint != nil { stopDayPlayback() }
+                    handleSelectedFootprintChange(selectedFootprint)
+                }
+                .onChange(of: selectedTransport?.id) { _, selectedID in
+                    if selectedID != nil { stopDayPlayback() }
+                }
+                .onChange(of: activeTimelineDate) { _, newDate in
+                    if let playbackDate = dayPlaybackDate,
+                       !Calendar.current.isDate(playbackDate, inSameDayAs: newDate) {
+                        startDayPlayback(for: newDate, preservingPlaybackSession: true)
+                    }
+                }
+                .task(id: footprintCameraSourceKey) {
+                    await loadSelectedFootprintCameraCoordinates()
+                }
+                .onChange(of: allPlaces) { _, newValue in
+                    locationManager.allPlaces = newValue
+                    locationManager.forceRefreshOngoingAnalysis()
+                }
+                .onChange(of: timelineDetent) { oldValue, newValue in
+                    if dayPlaybackDate != nil,
+                       newValue != .height(collapsedTimelineDetentHeight) {
+                        stopDayPlayback(restoresTimelineDetent: false)
+                    }
+                    handleTimelineDetentChange(oldValue: oldValue, newValue: newValue)
+                }
+                .onChange(of: isCoveringDayPlaybackUI) { _, isCovered in
+                    handleDayPlaybackCoverChange(isCovered)
+                }
+        )
+    }
+
+    private var timelineSceneSystemEvents: AnyView {
+        AnyView(
+            timelineScenePlaybackEvents
+                .onChange(of: isCalendarScrollLocked) { _, isLocked in
+                    if isLocked {
+                        visibleMapUpdateTask?.cancel()
+                        if selectedFootprint == nil {
+                            mapCameraTransitionTask?.cancel()
+                            if let displayedMapRegion {
+                                renderedMapRegion = displayedMapRegion
+                            }
+                        }
+                        return
+                    }
+                    // An explicit date jump has already finished positioning the
+                    // timeline. Start its camera animation in the same run-loop turn;
+                    // manual scrolling still uses the geometry coalescer below.
+                    refreshVisibleTimelineMap(for: visibleTimelineDates, delayNanoseconds: 0)
+                }
+                .onChange(of: cameraPosition.followsUserLocation) { _, isFollowing in
+                    guard isFollowing else { return }
+                    // A pending timeline fit must not overwrite an explicit locate request.
+                    visibleMapUpdateTask?.cancel()
+                    mapCameraTransitionTask?.cancel()
+                    if !isSideBySide, timelineDetent == .medium {
+                        focusMapOnCurrentLocation()
+                    } else {
+                        renderedMapRegion = nil
+                        displayedMapRegion = nil
+                    }
+                }
+                .onChange(of: locationManager.lastLocation?.timestamp) { _, _ in
+                    guard visibleTimelineItems.isEmpty else { return }
+                    refreshVisibleTimelineMap(delayNanoseconds: 0)
+                }
+                .onChange(of: locationManager.authStatus) { _, _ in
+                    scheduleLocationSettingsAlertIfNeeded()
+                }
+                .onChange(of: isTrackingEnabled) { _, _ in
+                    scheduleLocationSettingsAlertIfNeeded()
+                }
+                .onChange(of: isActive) { _, active in
+                    if !active { stopDayPlayback() }
+                }
+                .onChange(of: scenePhase) { _, phase in
+                    guard phase == .active else { return }
+                    locationManager.refreshAuthorizationStatus()
+                    scheduleLocationSettingsAlertIfNeeded()
+                    Task { await refreshTimelineForCurrentDayIfNeeded() }
+                }
+                .onOpenURL(perform: handleDeepLinkURL)
+                .alert("确认已到达？", isPresented: $showingArrivalConfirmation) {
+                    Button("取消", role: .cancel) { }
+                    Button("确认到达") {
+                        Task { await locationManager.confirmArrival() }
+                    }
+                } message: {
+                    Text("将结束当前移动，并开始记录停留。")
+                }
+        )
     }
 
     private func consumeDestination() {
@@ -600,6 +1476,7 @@ struct TimelineScene<Content: View>: View {
     }
 
     private func returnToNow() {
+        stopDayPlayback()
         selectedFootprint = nil
         selectedFootprintGroup = nil
         selectedTransport = nil
@@ -659,6 +1536,7 @@ struct TimelineScene<Content: View>: View {
     }
 
     private func handleTimelineDisappear() {
+        stopDayPlayback()
         midnightTimelineRefreshTask?.cancel()
         timelineReloadTask?.cancel()
         visibleMapUpdateTask?.cancel()
@@ -669,6 +1547,19 @@ struct TimelineScene<Content: View>: View {
     }
 
     private func handleFootprintDataChanged(_: Notification) {
+        // Daily playback owns an immutable snapshot. Automatic tracking,
+        // CloudKit imports and background consolidation all publish this same
+        // unscoped notification, so stopping here made playback appear to exit
+        // randomly. Keep the snapshot stable and merge those changes after the
+        // user leaves playback.
+        if dayPlaybackDate != nil {
+            dayPlaybackDefersTimelineReload = true
+            return
+        }
+        scheduleTimelineReloadAfterDataChange()
+    }
+
+    private func scheduleTimelineReloadAfterDataChange() {
         // CloudKit imports and one logical timeline save can emit a burst of
         // store-change notifications. Reloading all mounted days and the map
         // for every event causes visible stalls and sustained CPU/GPU work.
@@ -1911,9 +2802,11 @@ struct TimelineScene<Content: View>: View {
             longitudeSpanDelta <= referenceLongitudeSpan * 0.6
     }
 
-    private func moveMapCamera(to target: MKCoordinateRegion, animated: Bool) {
-        guard isRenderableMapRegion(target) else { return }
+    @discardableResult
+    private func moveMapCamera(to target: MKCoordinateRegion, animated: Bool) -> TimeInterval {
+        guard isRenderableMapRegion(target) else { return 0 }
         mapCameraTransitionTask?.cancel()
+        mapCameraTransitionTask = nil
         let source = displayedMapRegion ?? renderedMapRegion
         renderedMapRegion = target
 
@@ -1923,10 +2816,11 @@ struct TimelineScene<Content: View>: View {
                 withAnimation(.easeInOut(duration: 0.5)) {
                     cameraPosition = .region(target)
                 }
+                return 0.5
             } else {
                 cameraPosition = .region(target)
+                return 0
             }
-            return
         }
 
         guard !isMinorCameraAdjustment(from: source, to: target) else {
@@ -1934,7 +2828,7 @@ struct TimelineScene<Content: View>: View {
             withAnimation(.easeInOut(duration: 0.35)) {
                 cameraPosition = .region(target)
             }
-            return
+            return 0.35
         }
 
         let latitudeDistance = abs(target.center.latitude - source.center.latitude)
@@ -1955,6 +2849,7 @@ struct TimelineScene<Content: View>: View {
                 try? await Task.sleep(nanoseconds: 30_000_000)
             }
         }
+        return Double(stepCount + 1) * 0.03
     }
 
     /// A sheet detent transition changes which vertical portion of the same
@@ -2311,6 +3206,8 @@ private struct TimelineView: View {
     let availableDates: TimelineLoadableDateIndex
     let visibleDatesChanged: (Set<Date>) -> Void
     let visibleItemIDsChanged: (Set<String>) -> Void
+    let onPlayDay: (Date) -> Void
+    let onCoveringPresentationChanged: (Bool) -> Void
     let isActive: Bool
     /// Starts the shared photo import flow here, without leaving Records.
     @State private var isPhotoImportRequested = false
@@ -2319,6 +3216,28 @@ private struct TimelineView: View {
 
     private var isCollapsed: Bool {
         !isSideBySide && timelineDetent == .height(collapsedTimelineDetentHeight)
+    }
+
+    private var hasCoveringPresentation: Bool {
+        isShowingCalendar ||
+            footprintPendingSplit != nil ||
+            transportPendingSplit != nil ||
+            selectedTransport != nil ||
+            sharePayload != nil ||
+            showingTimelineShareRangePicker ||
+            importantPlaceDraft != nil ||
+            showingRawPointsDate != nil ||
+            showingResetAlert ||
+            locationManager.resetDataError != nil ||
+            footprintPendingDeletion != nil ||
+            footprintPendingIgnore != nil ||
+            transportPendingDeletion != nil ||
+            pendingMergeCandidate != nil ||
+            pendingTransportMergeCandidate != nil ||
+            selectedMapPhotoAssetID != nil ||
+            selectedFootprint != nil ||
+            selectedFootprintGroup != nil ||
+            isPhotoImportRequested
     }
 
     private var timelineScrollPositionBinding: Binding<ScrollTarget?> {
@@ -2410,6 +3329,15 @@ private struct TimelineView: View {
                 .onChange(of: returnToNowRequest) { _, _ in
                     requestScrollToToday(using: proxy, expandsCollapsedTimeline: false)
                 }
+        }
+        .onAppear {
+            onCoveringPresentationChanged(hasCoveringPresentation)
+        }
+        .onChange(of: hasCoveringPresentation) { _, isPresented in
+            onCoveringPresentationChanged(isPresented)
+        }
+        .onDisappear {
+            onCoveringPresentationChanged(false)
         }
     }
 
@@ -3948,11 +4876,21 @@ private struct TimelineView: View {
         // effect, so the timeline layout, scroll targets and date frames that
         // drive the header and map stay exactly as they are.
         .overlay(alignment: .topLeading) {
-            stickyDateLine(for: date, canShare: !items.isEmpty, top: dateLineTop)
+            stickyDateLine(
+                for: date,
+                canShare: !items.isEmpty,
+                canPlay: items.contains { item in
+                    if case .transport(let transport) = item {
+                        return transport.points.count >= 2
+                    }
+                    return false
+                },
+                top: dateLineTop
+            )
         }
     }
 
-    private func stickyDateLine(for date: Date, canShare: Bool, top: CGFloat) -> some View {
+    private func stickyDateLine(for date: Date, canShare: Bool, canPlay: Bool, top: CGFloat) -> some View {
         let height: CGFloat = 30
         // The overlay spans its whole day. The date line slides down by how
         // far the day has scrolled past the top, stopping where the day ends.
@@ -3991,21 +4929,34 @@ private struct TimelineView: View {
                     .minimumScaleFactor(0.75)
                     .frame(width: ContinuousTimelineLayout.dateColumnWidth, alignment: .leading)
                 Spacer(minLength: 0)
-                if canShare {
-                    Button {
-                        prepareTimelineShare(for: date)
-                    } label: {
-                        Image(systemName: "square.and.arrow.up")
-                            .font(.system(size: 13, weight: .semibold))
-                            .foregroundStyle(.secondary)
-                            .frame(width: 44, height: height, alignment: .trailing)
-                            .contentShape(Rectangle())
+                HStack(spacing: 8) {
+                    if canPlay {
+                        Button {
+                            onPlayDay(Calendar.current.startOfDay(for: date))
+                        } label: {
+                            Image(systemName: "play.fill")
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundStyle(Color.dfkAccent)
+                                .frame(width: 36, height: height)
+                                .contentShape(Circle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("播放这一天的完整轨迹")
                     }
-                    .buttonStyle(.plain)
-                    // Align the icon with the timeline's right edge; the tap
-                    // area still extends to its left.
-                    .padding(.trailing, 2)
-                    .accessibilityLabel("分享这一天的足迹")
+                    if canShare {
+                        Button {
+                            prepareTimelineShare(for: date)
+                        } label: {
+                            Image(systemName: "square.and.arrow.up")
+                                .font(.system(size: 13, weight: .semibold))
+                                .foregroundStyle(.secondary)
+                                .frame(width: 36, height: height)
+                                .contentShape(Circle())
+                        }
+                        .buttonStyle(.plain)
+                        .padding(.trailing, 2)
+                        .accessibilityLabel("分享这一天的足迹")
+                    }
                 }
             }
             .frame(height: height)

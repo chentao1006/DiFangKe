@@ -44,6 +44,12 @@
 	<real>18</real>
 	<key>TRANSPORT_ROUTE_ANIMATION_END_PAUSE</key>
 	<real>1.2</real>
+	<!-- 每日回放进入交通段时，相机跨度相对整段路线取景范围的比例 -->
+	<key>DAY_ROUTE_PLAYBACK_TRANSPORT_CAMERA_SPAN_RATIO</key>
+	<real>0.5</real>
+	<!-- 每日回放进入停留段时，相机跨度相对街道级单点取景范围的比例 -->
+	<key>DAY_ROUTE_PLAYBACK_STOP_CAMERA_SPAN_RATIO</key>
+	<real>2.0</real>
 	<key>AI_LIMIT_PER_MINUTE</key>
 	<integer>1</integer>
 	<key>AI_LIMIT_PER_HOUR</key>

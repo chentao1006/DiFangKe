@@ -1400,6 +1400,17 @@ func reviewIntegratedPlaceKey(
 }
 
 /// DiFangKe 统一地图组件，用于确保全应用地图表现一致
+struct DFKMapPlaybackOverlay: @unchecked Sendable {
+    let coordinate: CLLocationCoordinate2D
+    let symbolName: String
+    let timeText: String
+    let markerColor: Color
+    let isStop: Bool
+    let isMarkerHidden: Bool
+    let travelsWest: Bool
+    let highlightedSegments: [TransportLineSegment]
+}
+
 struct DFKMapView: View {
     @Binding var cameraPosition: MapCameraPosition
     var isInteractive: Bool = false
@@ -1427,8 +1438,13 @@ struct DFKMapView: View {
     var selectedFootprintID: UUID? = nil
     var selectedFootprintCoordinate: CLLocationCoordinate2D? = nil
     var selectedTimeCoordinate: CLLocationCoordinate2D? = nil
+    var playbackOverlay: DFKMapPlaybackOverlay? = nil
+    var centersPlaybackMarkerOnScreen: Bool = false
     var timelineUpdateIdentifier: Int? = nil
     var onMapInteraction: ((MapInteractionType) -> Void)? = nil
+    var onMapTouchChanged: ((Bool) -> Void)? = nil
+    var onCameraChanged: ((MapCamera, MKCoordinateRegion) -> Void)? = nil
+    var onCameraChanging: ((MapCamera, MKCoordinateRegion) -> Void)? = nil
     var showsMapControls: Bool = true
 
     enum MapInteractionType {
@@ -1503,8 +1519,13 @@ struct DFKMapView: View {
         selectedFootprintID: UUID? = nil,
         selectedFootprintCoordinate: CLLocationCoordinate2D? = nil,
         selectedTimeCoordinate: CLLocationCoordinate2D? = nil,
+        playbackOverlay: DFKMapPlaybackOverlay? = nil,
+        centersPlaybackMarkerOnScreen: Bool = false,
         timelineUpdateIdentifier: Int? = nil,
         onMapInteraction: ((MapInteractionType) -> Void)? = nil,
+        onMapTouchChanged: ((Bool) -> Void)? = nil,
+        onCameraChanged: ((MapCamera, MKCoordinateRegion) -> Void)? = nil,
+        onCameraChanging: ((MapCamera, MKCoordinateRegion) -> Void)? = nil,
         showsMapControls: Bool = true,
         onTimelineItemTap: ((TimelineItem) -> Void)? = nil,
         onAggregatedFootprintTap: ((AggregatedFootprint) -> Void)? = nil,
@@ -1536,8 +1557,13 @@ struct DFKMapView: View {
         self.selectedFootprintID = selectedFootprintID
         self.selectedFootprintCoordinate = selectedFootprintCoordinate
         self.selectedTimeCoordinate = selectedTimeCoordinate
+        self.playbackOverlay = playbackOverlay
+        self.centersPlaybackMarkerOnScreen = centersPlaybackMarkerOnScreen
         self.timelineUpdateIdentifier = timelineUpdateIdentifier
         self.onMapInteraction = onMapInteraction
+        self.onMapTouchChanged = onMapTouchChanged
+        self.onCameraChanged = onCameraChanged
+        self.onCameraChanging = onCameraChanging
         self.showsMapControls = showsMapControls
         self.onTimelineItemTap = onTimelineItemTap
         self.onAggregatedFootprintTap = onAggregatedFootprintTap
@@ -2122,62 +2148,87 @@ struct DFKMapView: View {
                                 }
 
                                 transportMapContent()
+                                playbackMapContent()
 
-                                ForEach(validAggregatedFootprints) { aggregated in
-                                    Annotation("", coordinate: aggregated.coordinate, anchor: .bottom) {
-                                        aggregatedAnnotationContent(for: aggregated)
-                                            .mapAnnotationLayer(MapAnnotationLayer.footprint)
-                                            .onTapGesture {
-                                                handleFootprintTap(for: aggregated)
-                                            }
-                                    }
-                                }
-
-                                ForEach(validPhotoAnnotations, id: \.asset.localIdentifier) { entry in
-                                    Annotation("", coordinate: entry.coordinate, anchor: .bottom) {
-                                        Button {
-                                            annotationTapRevision &+= 1
-                                            onPhotoTap?(entry.asset)
-                                        } label: {
-                                            photoAnnotationContent(for: entry.asset)
-                                                .mapAnnotationLayer(MapAnnotationLayer.photo)
+                                if playbackOverlay == nil {
+                                    ForEach(validAggregatedFootprints) { aggregated in
+                                        Annotation("", coordinate: aggregated.coordinate, anchor: .bottom) {
+                                            aggregatedAnnotationContent(for: aggregated)
+                                                .mapAnnotationLayer(MapAnnotationLayer.footprint)
+                                                .onTapGesture {
+                                                    handleFootprintTap(for: aggregated)
+                                                }
                                         }
-                                        .buttonStyle(.plain)
                                     }
-                                }
 
-                                ForEach(validHeatmapPoints) { point in
-                                    Annotation("", coordinate: point.coordinate) {
-                                        heatmapAnnotationContent(for: point)
+                                    ForEach(validPhotoAnnotations, id: \.asset.localIdentifier) { entry in
+                                        Annotation("", coordinate: entry.coordinate, anchor: .bottom) {
+                                            Button {
+                                                annotationTapRevision &+= 1
+                                                onPhotoTap?(entry.asset)
+                                            } label: {
+                                                photoAnnotationContent(for: entry.asset)
+                                                    .mapAnnotationLayer(MapAnnotationLayer.photo)
+                                            }
+                                            .buttonStyle(.plain)
+                                        }
                                     }
-                                }
 
-                                if let coordinate = validMainAnnotationCoordinate {
-                                    Annotation(mainAnnotationTitle ?? "", coordinate: coordinate) {
-                                        Circle()
-                                            .fill(Color.dfkAccent)
-                                            .frame(width: isInteractive ? 18 : 14, height: isInteractive ? 18 : 14)
-                                            .overlay(Circle().stroke(Color(uiColor: .systemBackground), lineWidth: 2))
+                                    ForEach(validHeatmapPoints) { point in
+                                        Annotation("", coordinate: point.coordinate) {
+                                            heatmapAnnotationContent(for: point)
+                                        }
                                     }
-                                }
 
-                                if let coordinate = selectedTimeCoordinate, coordinate.isRenderableMapCoordinate {
-                                    Annotation("", coordinate: coordinate) {
-                                        Circle()
-                                            .fill(Color.orange)
-                                            .frame(width: 16, height: 16)
-                                            .shadow(color: .black.opacity(0.3), radius: 2, x: 0, y: 1)
+                                    if let coordinate = validMainAnnotationCoordinate {
+                                        Annotation(mainAnnotationTitle ?? "", coordinate: coordinate) {
+                                            Circle()
+                                                .fill(Color.dfkAccent)
+                                                .frame(width: isInteractive ? 18 : 14, height: isInteractive ? 18 : 14)
+                                                .overlay(Circle().stroke(Color(uiColor: .systemBackground), lineWidth: 2))
+                                        }
                                     }
-                                }
 
-                                if showsUserLocation {
-                                    UserAnnotation()
+                                    if let coordinate = selectedTimeCoordinate, coordinate.isRenderableMapCoordinate {
+                                        Annotation("", coordinate: coordinate) {
+                                            Circle()
+                                                .fill(Color.orange)
+                                                .frame(width: 16, height: 16)
+                                                .shadow(color: .black.opacity(0.3), radius: 2, x: 0, y: 1)
+                                        }
+                                    }
+
+                                    if showsUserLocation {
+                                        UserAnnotation()
+                                    }
                                 }
                                 }
                                 .id(timelineUpdateIdentifier ?? 0)
+                                .background {
+                                    if let onMapTouchChanged {
+                                        RouteMapNativeGestureObserver(
+                                            onInteractionChanged: { _, _ in },
+                                            onTouchChanged: onMapTouchChanged
+                                        )
+                                    }
+                                }
                                 .mapStyle(.standard(elevation: .automatic, emphasis: .muted))
+                                .overlay {
+                                    if centersPlaybackMarkerOnScreen,
+                                       let playbackOverlay,
+                                       !playbackOverlay.isMarkerHidden {
+                                        playbackMarkerContent(for: playbackOverlay)
+                                            .offset(y: playbackOverlay.isStop ? -20 : 0)
+                                            .allowsHitTesting(false)
+                                            .accessibilityHidden(true)
+                                    }
+                                }
+                                .onMapCameraChange(frequency: .continuous) { context in
+                                    onCameraChanging?(context.camera, context.region)
+                                }
                                 .onMapCameraChange(frequency: .onEnd) { context in
                                     transportVisibleRegion = context.region
+                                    onCameraChanged?(context.camera, context.region)
                                     if clustersPlacesByMapScale {
                                         placeClusterVisibleRegion = context.region
                                     }
@@ -2186,6 +2237,7 @@ struct DFKMapView: View {
                                     SpatialTapGesture(coordinateSpace: .local)
                                         .onEnded { value in
                                             guard let coordinate = mapProxy.convert(value.location, from: .local) else { return }
+                                        guard playbackOverlay == nil else { return }
                                             handleTransportLineTap(
                                                 at: coordinate,
                                                 mapSize: geometry.size,
@@ -2463,21 +2515,38 @@ struct DFKMapView: View {
     private func standardFootprintAnnotationContent(for aggregated: AggregatedFootprint, showsPhoto: Bool? = nil) -> some View {
         let fp = aggregated.representative
         let isSelected = aggregated.footprints.contains { $0.footprintID == selectedFootprintID }
-        let constantScale: CGFloat = 1.32
-        let baseSize: CGFloat = isInteractive ? 25 : 20
-        let size = isMiniTimelineMode ? 11 : baseSize * constantScale
         let activity = fp.getActivityType(from: allActivities)
-        let activityColor = activity?.color ?? Color.gray
-        let iconColor: Color = .white
-        let iconName = activity?.icon ?? footprintFallbackIcon
-        let usesLargeMissingActivitySymbol = activity == nil && footprintFallbackIcon == FootprintIconDefaults.card
-        let iconSize: CGFloat = isMiniTimelineMode ? 9 : (usesLargeMissingActivitySymbol ? 18 : 10) * constantScale
-        let durationTuple = formatDuration(aggregated.totalDuration)
-        let fontSize = isInteractive ? 6.5 * constantScale : 5.5 * constantScale
-
         let photoImage = (showsPhoto ?? !prefersActivityIcons)
             ? latestPhotoAssetID(for: aggregated).flatMap { liveMapPhotoImages[$0] }
             : nil
+        return standardFootprintMarker(
+            activityColor: activity?.color ?? Color.gray,
+            iconName: activity?.icon ?? footprintFallbackIcon,
+            photoImage: photoImage,
+            duration: aggregated.totalDuration
+        )
+        .scaleEffect(isSelected ? 1.5 : 1.0, anchor: .bottom)
+        .contentShape(Rectangle())
+        .animation(.spring(response: 0.6, dampingFraction: 0.7), value: selectedFootprintID)
+    }
+
+    private func standardFootprintMarker(
+        activityColor: Color,
+        iconName: String,
+        photoImage: UIImage?,
+        duration: TimeInterval,
+        labelTuple: (number: String, unit: String)? = nil
+    ) -> some View {
+        let constantScale: CGFloat = 1.32
+        let baseSize: CGFloat = isInteractive ? 25 : 20
+        let size = isMiniTimelineMode ? 11 : baseSize * constantScale
+        let iconColor: Color = .white
+        let usesLargeMissingActivitySymbol = iconName == FootprintIconDefaults.card
+        let iconSize: CGFloat = isMiniTimelineMode ? 9 : (usesLargeMissingActivitySymbol ? 18 : 10) * constantScale
+        let durationTuple = labelTuple ?? formatDuration(duration)
+        let fontSize = isInteractive ? 6.5 * constantScale : 5.5 * constantScale
+        let showsLabel = labelTuple != nil || duration >= AppConfig.shared.stayDurationThreshold
+
         return DFKFootprintMapMarker(
             size: size,
             constantScale: constantScale,
@@ -2486,12 +2555,9 @@ struct DFKMapView: View {
             iconName: iconName,
             iconSize: iconSize,
             photoImage: photoImage,
-            durationTuple: isMiniTimelineMode || aggregated.totalDuration < AppConfig.shared.stayDurationThreshold ? nil : durationTuple,
+            durationTuple: isMiniTimelineMode || !showsLabel ? nil : durationTuple,
             fontSize: fontSize
         )
-        .scaleEffect(isSelected ? 1.5 : 1.0, anchor: .bottom)
-        .contentShape(Rectangle())
-        .animation(.spring(response: 0.6, dampingFraction: 0.7), value: selectedFootprintID)
     }
 
     private var transportIconSize: CGFloat {
@@ -2558,17 +2624,23 @@ struct DFKMapView: View {
                     )
             }
 
-            ForEach(displayedTransportIconPoints) { point in
-                Annotation("", coordinate: point.coordinate) {
-                    transportOverviewIcon(point)
-                        .mapAnnotationLayer(MapAnnotationLayer.transport)
+            if playbackOverlay == nil {
+                ForEach(displayedTransportIconPoints) { point in
+                    Annotation("", coordinate: point.coordinate) {
+                        transportOverviewIcon(point)
+                            .mapAnnotationLayer(MapAnnotationLayer.transport)
+                    }
                 }
             }
         } else {
             ForEach(renderedTransportSegments) { segment in
                 MapPolyline(coordinates: segment.coordinates)
                     .stroke(
-                        Color.dfkAccent.opacity(segment.isDashed ? 0.4 : 0.7),
+                        Color.dfkAccent.opacity(
+                            playbackOverlay == nil
+                                ? (segment.isDashed ? 0.4 : 0.7)
+                                : (segment.isDashed ? 0.18 : 0.24)
+                        ),
                         style: StrokeStyle(
                             lineWidth: segment.isDashed ? 1 : (isInteractive ? 3 : 2),
                             lineCap: .round,
@@ -2579,7 +2651,8 @@ struct DFKMapView: View {
             }
 
             ForEach(renderedTransportAnnotationItems) { display in
-                if !mergedTransportIconIDs.contains(display.id),
+                if playbackOverlay == nil,
+                   !mergedTransportIconIDs.contains(display.id),
                    let coord = visibleTransportMidpoints[display.id] ?? display.midpoint {
                     Annotation("", coordinate: coord) {
                         transportAnnotationContent(for: display)
@@ -2588,6 +2661,77 @@ struct DFKMapView: View {
                 }
             }
         }
+    }
+
+    @MapContentBuilder
+    private func playbackMapContent() -> some MapContent {
+        if let playbackOverlay {
+            ForEach(playbackOverlay.highlightedSegments) { segment in
+                MapPolyline(coordinates: segment.coordinates)
+                    .stroke(
+                        Color.dfkAccent,
+                        style: StrokeStyle(
+                            lineWidth: segment.isDashed ? 1.5 : 4,
+                            lineCap: .round,
+                            lineJoin: .round,
+                            dash: segment.isDashed ? [5, 5] : []
+                        )
+                    )
+            }
+            if !centersPlaybackMarkerOnScreen, !playbackOverlay.isMarkerHidden {
+                Annotation(
+                    "",
+                    coordinate: playbackOverlay.coordinate,
+                    anchor: playbackOverlay.isStop ? .bottom : .center
+                ) {
+                    playbackMarkerContent(for: playbackOverlay)
+                        .mapAnnotationLayer(MapAnnotationLayer.animatedTransport)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func playbackMarkerContent(for playbackOverlay: DFKMapPlaybackOverlay) -> some View {
+        Group {
+            if playbackOverlay.isStop {
+                standardFootprintMarker(
+                    activityColor: playbackOverlay.markerColor,
+                    iconName: playbackOverlay.symbolName,
+                    photoImage: nil,
+                    duration: 0,
+                    labelTuple: (playbackOverlay.timeText, "")
+                )
+                .scaleEffect(1.5, anchor: .bottom)
+            } else {
+                let markerColor = playbackOverlay.markerColor
+                ZStack(alignment: .top) {
+                    Circle()
+                        .fill(Color(uiColor: .systemBackground))
+                        .frame(width: 30, height: 30)
+                        .overlay(Circle().stroke(markerColor, lineWidth: 1.5))
+                        .shadow(color: .black.opacity(0.18), radius: 3, y: 2)
+                        .overlay {
+                            Image(systemName: playbackOverlay.symbolName)
+                                .font(.system(size: 15, weight: .bold))
+                                .foregroundStyle(markerColor)
+                                .scaleEffect(x: playbackOverlay.travelsWest ? -1 : 1, y: 1)
+                        }
+                    Text(playbackOverlay.timeText)
+                        .font(.system(size: 9, weight: .bold, design: .rounded))
+                        .lineLimit(1)
+                        .foregroundStyle(markerColor)
+                        .padding(.horizontal, 3)
+                        .padding(.vertical, 1)
+                        .background(RoundedRectangle(cornerRadius: 3).fill(Color(uiColor: .systemBackground)))
+                        .overlay(RoundedRectangle(cornerRadius: 3).stroke(markerColor, lineWidth: 0.5))
+                        .offset(y: 25)
+                }
+                .frame(width: 48, height: 42, alignment: .top)
+                .offset(y: 6)
+            }
+        }
+        .accessibilityHidden(true)
     }
 
 
