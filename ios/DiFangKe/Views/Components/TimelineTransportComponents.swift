@@ -18,11 +18,42 @@ struct TransportRouteProgressGeometry: @unchecked Sendable {
     let coordinates: [CLLocationCoordinate2D]
     let edgeIsDashed: [Bool]
 
+    /// MapKit must never receive an invalid or zero-length polyline.  Keep the
+    /// cleanup in the shared background playback builder so every playback
+    /// surface renders the exact same safe geometry.
+    nonisolated static func renderableCoordinates(
+        _ coordinates: [CLLocationCoordinate2D]
+    ) -> [CLLocationCoordinate2D] {
+        var result: [CLLocationCoordinate2D] = []
+        result.reserveCapacity(coordinates.count)
+        for coordinate in coordinates where coordinate.isRenderableMapCoordinate {
+            guard result.last?.latitude != coordinate.latitude ||
+                    result.last?.longitude != coordinate.longitude else { continue }
+            result.append(coordinate)
+        }
+        return result.count >= 2 ? result : []
+    }
+
+    nonisolated static func renderableSegments(
+        _ segments: [TransportLineSegment],
+        idPrefix: String
+    ) -> [TransportLineSegment] {
+        segments.enumerated().compactMap { index, segment in
+            let coordinates = renderableCoordinates(segment.coordinates)
+            guard coordinates.count >= 2 else { return nil }
+            return TransportLineSegment(
+                id: "\(idPrefix)-\(index)",
+                coordinates: coordinates,
+                isDashed: segment.isDashed
+            )
+        }
+    }
+
     nonisolated init(segments: [TransportLineSegment]) {
         var coordinates: [CLLocationCoordinate2D] = []
         var edgeStyles: [Bool] = []
         for segment in segments {
-            for coordinate in segment.coordinates where coordinate.isRenderableMapCoordinate {
+            for coordinate in Self.renderableCoordinates(segment.coordinates) {
                 if coordinates.last?.latitude != coordinate.latitude ||
                     coordinates.last?.longitude != coordinate.longitude {
                     if !coordinates.isEmpty {
@@ -124,7 +155,7 @@ struct TransportRouteAnimation: @unchecked Sendable {
         let minimumDuration = max(config.transportRouteAnimationMinDuration, 1)
         let maximumDuration = max(config.transportRouteAnimationMaxDuration, minimumDuration)
         let loopDuration = min(max(animationDuration / timeScale, minimumDuration), maximumDuration)
-        let framesPerSecond = 15.0
+        let framesPerSecond = max(config.mapRoutePlaybackFrameRate, 1)
         let frameCount = max(2, Int((loopDuration * framesPerSecond).rounded()))
         var frames: [TransportRouteAnimationFrame] = []
         frames.reserveCapacity(frameCount)
@@ -350,6 +381,13 @@ struct TransportRouteAnimation: @unchecked Sendable {
 
 struct DayRoutePlaybackInput: @unchecked Sendable {
     enum Kind: @unchecked Sendable {
+        case stop(
+            coordinate: CLLocationCoordinate2D,
+            startTime: Date,
+            endTime: Date,
+            symbolName: String,
+            colorHex: String?
+        )
         case footprint(
             latitudeData: Data,
             longitudeData: Data,
@@ -363,6 +401,13 @@ struct DayRoutePlaybackInput: @unchecked Sendable {
 
     let kind: Kind
     let startTime: Date
+    let contextLabel: String?
+
+    init(kind: Kind, startTime: Date, contextLabel: String? = nil) {
+        self.kind = kind
+        self.startTime = startTime
+        self.contextLabel = contextLabel
+    }
 }
 
 struct DayRoutePlaybackFrame: @unchecked Sendable {
@@ -376,31 +421,104 @@ struct DayRoutePlaybackFrame: @unchecked Sendable {
     let activeRouteIndex: Int?
     let activeRouteCoordinateIndex: Int
     let completedRouteCount: Int
+    let completedStopCount: Int
+    let contextLabel: String?
+}
+
+struct DayRoutePlaybackStopMarker: Identifiable, @unchecked Sendable {
+    let id: String
+    let stopIndex: Int
+    let coordinate: CLLocationCoordinate2D
+    let symbolName: String
+    let colorHex: String?
+    let duration: TimeInterval
+
+}
+
+struct TimelinePlaybackSnapPoint: Identifiable, Sendable {
+    let progress: Double
+    let label: String
+    var id: String { "\(label)-\(progress)" }
+}
+
+struct TimelinePlaybackTrackSegment: Identifiable, Sendable {
+    let startProgress: Double
+    let endProgress: Double
+    let colorHex: String?
+
+    var id: String { "\(startProgress)-\(endProgress)-\(colorHex ?? "accent")" }
 }
 
 struct DayRoutePlayback: @unchecked Sendable {
+    /// Separates MapKit content identities when a date or trip snapshot is
+    /// replaced. Reusing `route-0`/`stop-0` for new geometry can make
+    /// VectorKit mutate an old overlay in place while it is still rendering.
+    let renderIdentity: String
     let frames: [DayRoutePlaybackFrame]
     let routeGeometries: [TransportRouteProgressGeometry]
+    let routeSegments: [TransportLineSegment]
+    let stopMarkers: [DayRoutePlaybackStopMarker]
+    let contextBreakpoints: [TimelinePlaybackSnapPoint]
+    let trackSegments: [TimelinePlaybackTrackSegment]
     let frameInterval: TimeInterval
     let endPause: TimeInterval
 
     static let empty = DayRoutePlayback(
+        renderIdentity: "empty",
         frames: [],
         routeGeometries: [],
+        routeSegments: [],
+        stopMarkers: [],
+        contextBreakpoints: [],
+        trackSegments: [],
         frameInterval: 0,
         endPause: 0
     )
 
     nonisolated static func make(inputs: [DayRoutePlaybackInput]) -> DayRoutePlayback {
         let config = AppConfig.shared
-        let frameInterval = 1.0 / 15.0
+        let renderIdentity = UUID().uuidString
+        let frameInterval = 1.0 / max(config.mapRoutePlaybackFrameRate, 1)
         var frames: [DayRoutePlaybackFrame] = []
         var routes: [TransportRouteProgressGeometry] = []
+        var routeSegments: [TransportLineSegment] = []
+        var stopMarkers: [DayRoutePlaybackStopMarker] = []
         var stopCount = 0
 
         for input in inputs.sorted(by: { $0.startTime < $1.startTime }) {
             guard !Task.isCancelled else { return .empty }
             switch input.kind {
+            case let .stop(coordinate, startTime, endTime, symbolName, colorHex):
+                guard coordinate.isRenderableMapCoordinate,
+                      let playbackStart = stopPlaybackStart(
+                        startTime: startTime,
+                        endTime: endTime,
+                        playedUntil: frames.last?.timestamp,
+                        config: config
+                      ) else { continue }
+                stopMarkers.append(DayRoutePlaybackStopMarker(
+                    id: "\(renderIdentity)-stop-\(stopCount)",
+                    stopIndex: stopCount,
+                    coordinate: coordinate,
+                    symbolName: symbolName,
+                    colorHex: colorHex,
+                    duration: max(endTime.timeIntervalSince(startTime), 0)
+                ))
+                appendStopFrames(
+                    coordinate: coordinate,
+                    startTime: playbackStart,
+                    endTime: endTime,
+                    symbolName: symbolName,
+                    colorHex: colorHex,
+                    routeCount: routes.count,
+                    stopIndex: stopCount,
+                    frameInterval: frameInterval,
+                    config: config,
+                    contextLabel: input.contextLabel,
+                    frames: &frames
+                )
+                stopCount += 1
+
             case let .footprint(latitudeData, longitudeData, startTime, endTime, symbolName, colorHex):
                 let latitudes = (try? JSONDecoder().decode([Double].self, from: latitudeData)) ?? []
                 let longitudes = (try? JSONDecoder().decode([Double].self, from: longitudeData)) ?? []
@@ -409,49 +527,42 @@ struct DayRoutePlayback: @unchecked Sendable {
                     latitude: latitudes.reduce(0, +) / Double(latitudes.count),
                     longitude: longitudes.reduce(0, +) / Double(longitudes.count)
                 )
-                guard coordinate.isRenderableMapCoordinate else { continue }
-                let realDuration = max(endTime.timeIntervalSince(startTime), 0)
-                let minimumPlaybackDuration = max(config.transportRouteAnimationEndPause, frameInterval)
-                let maximumPlaybackDuration = max(
-                    config.transportRouteAnimationMinDuration,
-                    minimumPlaybackDuration
+                guard coordinate.isRenderableMapCoordinate,
+                      let playbackStart = stopPlaybackStart(
+                        startTime: startTime,
+                        endTime: endTime,
+                        playedUntil: frames.last?.timestamp,
+                        config: config
+                      ) else { continue }
+                stopMarkers.append(DayRoutePlaybackStopMarker(
+                    id: "\(renderIdentity)-stop-\(stopCount)",
+                    stopIndex: stopCount,
+                    coordinate: coordinate,
+                    symbolName: symbolName,
+                    colorHex: colorHex,
+                    duration: max(endTime.timeIntervalSince(startTime), 0)
+                ))
+                appendStopFrames(
+                    coordinate: coordinate,
+                    startTime: playbackStart,
+                    endTime: endTime,
+                    symbolName: symbolName,
+                    colorHex: colorHex,
+                    routeCount: routes.count,
+                    stopIndex: stopCount,
+                    frameInterval: frameInterval,
+                    config: config,
+                    contextLabel: input.contextLabel,
+                    frames: &frames
                 )
-                let stayDurationBaseline = max(config.stayDurationThreshold, 1)
-                let durationRatio = realDuration / stayDurationBaseline
-                let compressedPlaybackDuration = minimumPlaybackDuration * (1 + log1p(durationRatio))
-                let stopPlaybackDuration = min(
-                    max(compressedPlaybackDuration, minimumPlaybackDuration),
-                    maximumPlaybackDuration
-                )
-                let stopFrameCount = max(
-                    1,
-                    Int((stopPlaybackDuration / frameInterval).rounded())
-                )
-                let stopIndex = stopCount
                 stopCount += 1
-                for index in 0..<stopFrameCount {
-                    guard !Task.isCancelled else { return .empty }
-                    let fraction = stopFrameCount > 1
-                        ? Double(index) / Double(stopFrameCount - 1)
-                        : 0
-                    frames.append(DayRoutePlaybackFrame(
-                        coordinate: coordinate,
-                        timestamp: startTime.addingTimeInterval(
-                            realDuration * fraction
-                        ),
-                        symbolName: symbolName,
-                        activityColorHex: colorHex,
-                        isStop: true,
-                        stopIndex: stopIndex,
-                        travelsWest: false,
-                        activeRouteIndex: nil,
-                        activeRouteCoordinateIndex: 0,
-                        completedRouteCount: routes.count
-                    ))
-                }
 
             case let .transport(transport):
-                let segments = TransportRouteCompletion.cachedSegments(for: transport)
+                let routeIndex = routes.count
+                let segments = TransportRouteProgressGeometry.renderableSegments(
+                    TransportRouteCompletion.cachedSegments(for: transport),
+                    idPrefix: "\(renderIdentity)-route-\(routeIndex)"
+                )
                 let routeGeometry = TransportRouteProgressGeometry(segments: segments)
                 let coordinates = routeGeometry.coordinates
                 guard coordinates.count >= 2 else { continue }
@@ -463,10 +574,15 @@ struct DayRoutePlayback: @unchecked Sendable {
                     endTime: transport.endTime
                 )
                 guard !animation.frames.isEmpty else { continue }
-                let routeIndex = routes.count
                 routes.append(routeGeometry)
+                routeSegments.append(contentsOf: segments)
+                // A transport overlapping the previous item resumes where that
+                // item ended, so the playback clock never rewinds. Its route
+                // geometry is still kept for drawing and completion.
+                let playedUntil = frames.last?.timestamp
                 for frame in animation.frames {
                     guard !Task.isCancelled else { return .empty }
+                    if let playedUntil, frame.timestamp < playedUntil { continue }
                     frames.append(DayRoutePlaybackFrame(
                         coordinate: frame.coordinate,
                         timestamp: frame.timestamp,
@@ -480,19 +596,110 @@ struct DayRoutePlayback: @unchecked Sendable {
                             max(frame.routeCoordinateIndex, 0),
                             coordinates.count - 1
                         ),
-                        completedRouteCount: routeIndex
+                        completedRouteCount: routeIndex,
+                        completedStopCount: stopCount,
+                        contextLabel: input.contextLabel
                     ))
                 }
             }
         }
 
         guard !routes.isEmpty, frames.count >= 2 else { return .empty }
+        var contextBreakpoints: [TimelinePlaybackSnapPoint] = []
+        var previousContextLabel: String?
+        for (index, frame) in frames.enumerated() {
+            guard let label = frame.contextLabel, !label.isEmpty,
+                  label != previousContextLabel else { continue }
+            contextBreakpoints.append(TimelinePlaybackSnapPoint(
+                progress: frames.count > 1 ? Double(index) / Double(frames.count - 1) : 0,
+                label: label
+            ))
+            previousContextLabel = label
+        }
+        var trackSegments: [TimelinePlaybackTrackSegment] = []
+        var trackSegmentStartIndex = 0
+        var trackSegmentColorHex = frames[0].activityColorHex
+        for index in 1..<frames.count where frames[index].activityColorHex != trackSegmentColorHex {
+            trackSegments.append(TimelinePlaybackTrackSegment(
+                startProgress: Double(trackSegmentStartIndex) / Double(frames.count - 1),
+                endProgress: Double(index) / Double(frames.count - 1),
+                colorHex: trackSegmentColorHex
+            ))
+            trackSegmentStartIndex = index
+            trackSegmentColorHex = frames[index].activityColorHex
+        }
+        trackSegments.append(TimelinePlaybackTrackSegment(
+            startProgress: Double(trackSegmentStartIndex) / Double(frames.count - 1),
+            endProgress: 1,
+            colorHex: trackSegmentColorHex
+        ))
         return DayRoutePlayback(
+            renderIdentity: renderIdentity,
             frames: frames,
             routeGeometries: routes,
+            routeSegments: routeSegments,
+            stopMarkers: stopMarkers,
+            contextBreakpoints: contextBreakpoints,
+            trackSegments: trackSegments,
             frameInterval: frameInterval,
             endPause: max(config.transportRouteAnimationEndPause, 0)
         )
+    }
+
+    /// Recorded stops and transports can overlap in time. Frames are appended
+    /// item by item, so an overlapping stop must not rewind the playback clock.
+    /// Like `TimelineBuilder.resolveTimelineOverlaps`, the stop starts where the
+    /// previous item ended and is dropped when only a tiny stay remains.
+    nonisolated private static func stopPlaybackStart(
+        startTime: Date,
+        endTime: Date,
+        playedUntil: Date?,
+        config: AppConfig
+    ) -> Date? {
+        guard let playedUntil, playedUntil > startTime else { return startTime }
+        guard endTime > playedUntil.addingTimeInterval(config.tinyStayThreshold) else { return nil }
+        return playedUntil
+    }
+
+    nonisolated private static func appendStopFrames(
+        coordinate: CLLocationCoordinate2D,
+        startTime: Date,
+        endTime: Date,
+        symbolName: String,
+        colorHex: String?,
+        routeCount: Int,
+        stopIndex: Int,
+        frameInterval: TimeInterval,
+        config: AppConfig,
+        contextLabel: String?,
+        frames: inout [DayRoutePlaybackFrame]
+    ) {
+        let realDuration = max(endTime.timeIntervalSince(startTime), 0)
+        let minimumPlaybackDuration = max(config.transportRouteAnimationEndPause, frameInterval)
+        let maximumPlaybackDuration = max(config.transportRouteAnimationMinDuration, minimumPlaybackDuration)
+        let stayDurationBaseline = max(config.stayDurationThreshold, 1)
+        let durationRatio = realDuration / stayDurationBaseline
+        let compressedPlaybackDuration = minimumPlaybackDuration * (1 + log1p(durationRatio))
+        let stopPlaybackDuration = min(max(compressedPlaybackDuration, minimumPlaybackDuration), maximumPlaybackDuration)
+        let stopFrameCount = max(1, Int((stopPlaybackDuration / frameInterval).rounded()))
+        for index in 0..<stopFrameCount {
+            guard !Task.isCancelled else { return }
+            let fraction = stopFrameCount > 1 ? Double(index) / Double(stopFrameCount - 1) : 0
+            frames.append(DayRoutePlaybackFrame(
+                coordinate: coordinate,
+                timestamp: startTime.addingTimeInterval(realDuration * fraction),
+                symbolName: symbolName,
+                activityColorHex: colorHex,
+                isStop: true,
+                stopIndex: stopIndex,
+                travelsWest: false,
+                activeRouteIndex: nil,
+                activeRouteCoordinateIndex: 0,
+                completedRouteCount: routeCount,
+                completedStopCount: stopIndex,
+                contextLabel: contextLabel
+            ))
+        }
     }
 
     nonisolated func highlightedSegments(at frameIndex: Int) -> [TransportLineSegment] {
@@ -504,7 +711,7 @@ struct DayRoutePlayback: @unchecked Sendable {
             segments.append(contentsOf: geometry.highlightedSegments(
                 through: geometry.coordinates.count - 1,
                 endingAt: nil,
-                idPrefix: "day-playback-completed-\(routeIndex)"
+                idPrefix: "\(renderIdentity)-completed-\(routeIndex)"
             ))
         }
         if let routeIndex = frame.activeRouteIndex,
@@ -515,10 +722,179 @@ struct DayRoutePlayback: @unchecked Sendable {
             segments.append(contentsOf: geometry.highlightedSegments(
                     through: endIndex,
                     endingAt: frame.coordinate,
-                    idPrefix: "day-playback-active-\(routeIndex)"
+                    idPrefix: "\(renderIdentity)-active-\(routeIndex)"
             ))
         }
         return segments
+    }
+}
+
+enum TimelinePlaybackScrubPipeline {
+    static func progress(frameIndex: Int, frameCount: Int) -> Double {
+        guard frameCount > 1 else { return 0 }
+        return Double(frameIndex) / Double(frameCount - 1)
+    }
+
+    static func seek(
+        to progress: Double,
+        frameCount: Int,
+        task: inout Task<Void, Never>?,
+        apply: @escaping @MainActor (Int) async -> Void
+    ) {
+        guard frameCount > 1 else { return }
+        let boundedProgress = min(max(progress, 0), 1)
+        let index = min(
+            max(Int((boundedProgress * Double(frameCount - 1)).rounded()), 0),
+            frameCount - 1
+        )
+        task?.cancel()
+        task = Task { @MainActor in
+            await apply(index)
+        }
+    }
+}
+
+/// Immediate truth for the physical slider gesture. Automatic playback uses
+/// this same gate on every surface, instead of waiting for a page-specific
+/// SwiftUI state update before it stops committing frames.
+final class TimelinePlaybackScrubGate: ObservableObject {
+    @Published private(set) var isActive = false
+
+    func setActive(_ isActive: Bool) {
+        guard self.isActive != isActive else { return }
+        self.isActive = isActive
+    }
+}
+
+struct TimelinePlaybackResolvedFrame: @unchecked Sendable {
+    let index: Int
+    let frame: DayRoutePlaybackFrame
+    let highlightedSegments: [TransportLineSegment]
+}
+
+enum TimelinePlaybackFramePipeline {
+    nonisolated static func resolve(
+        playback: DayRoutePlayback,
+        index: Int
+    ) async -> TimelinePlaybackResolvedFrame? {
+        guard playback.frames.indices.contains(index) else { return nil }
+        return await Task.detached(priority: .userInitiated) {
+            guard !Task.isCancelled,
+                  playback.frames.indices.contains(index) else { return nil }
+            return TimelinePlaybackResolvedFrame(
+                index: index,
+                frame: playback.frames[index],
+                highlightedSegments: playback.highlightedSegments(at: index)
+            )
+        }.value
+    }
+}
+
+@MainActor
+enum TimelinePlaybackAdvancePipeline {
+    static func run(
+        frameCount: @escaping @MainActor () -> Int,
+        frameInterval: @escaping @MainActor () -> TimeInterval,
+        endPause: @escaping @MainActor () -> TimeInterval,
+        frameIndex: @escaping @MainActor () -> Int,
+        canAdvance: @escaping @MainActor () -> Bool,
+        resetLoopState: @escaping @MainActor () -> Void,
+        applyFrame: @escaping @MainActor (Int) async -> Void
+    ) async {
+        guard canAdvance(), frameCount() >= 2 else { return }
+        while !Task.isCancelled {
+            let currentIndex = frameIndex()
+            let currentFrameCount = frameCount()
+            guard currentFrameCount >= 2 else { return }
+            let isAtEnd = currentIndex == currentFrameCount - 1
+            let delay = isAtEnd ? endPause() : frameInterval()
+            try? await Task.sleep(for: .seconds(delay))
+            guard !Task.isCancelled, canAdvance() else { return }
+            let latestFrameCount = frameCount()
+            guard latestFrameCount >= 2 else { return }
+            if isAtEnd { resetLoopState() }
+            let nextIndex = isAtEnd ? 0 : min(currentIndex + 1, latestFrameCount - 1)
+            await applyFrame(nextIndex)
+        }
+    }
+}
+
+@MainActor
+enum TimelinePlaybackScrubLifecycle {
+    static func update(
+        isEditing: Bool,
+        gate: TimelinePlaybackScrubGate,
+        invalidateAutomaticAdvance: () -> Void,
+        cancelCameraWork: () -> Void
+    ) {
+        gate.setActive(isEditing)
+        if isEditing { invalidateAutomaticAdvance() }
+        cancelCameraWork()
+    }
+}
+
+enum TimelinePlaybackMotionPolicy {
+    /// Reduce Motion prevents implicit autoplay, but never disables controls
+    /// or overrides an explicit request to continue playback.
+    static func startsPaused(reduceMotionEnabled: Bool) -> Bool {
+        reduceMotionEnabled
+    }
+}
+
+struct DayRoutePlaybackCameraLayout: Sendable {
+    let viewport: CGSize
+    let visibleRect: CGRect
+}
+
+/// Camera targets shared by the daily and trip playback surfaces. Geometry
+/// preparation stays off the main thread; views only animate to the result.
+enum DayRoutePlaybackCameraFraming {
+    nonisolated static func transportRegion(
+        coordinates: [CLLocationCoordinate2D],
+        layout: DayRoutePlaybackCameraLayout,
+        isFollowing: Bool
+    ) -> MKCoordinateRegion? {
+        guard let target = FootprintCameraFraming.mapRect(
+            coordinates: coordinates,
+            viewport: layout.viewport,
+            visibleRect: layout.visibleRect
+        ).map({ MKCoordinateRegion($0) }) else { return nil }
+        let ratio = isFollowing
+            ? AppConfig.shared.dayRoutePlaybackTransportCameraSpanRatio
+            : 1
+        var region = target
+        region.span = MKCoordinateSpan(
+            latitudeDelta: target.span.latitudeDelta * ratio,
+            longitudeDelta: target.span.longitudeDelta * ratio
+        )
+        return isRenderable(region) ? region : nil
+    }
+
+    nonisolated static func stopRegion(
+        coordinate: CLLocationCoordinate2D,
+        layout: DayRoutePlaybackCameraLayout
+    ) -> MKCoordinateRegion? {
+        guard let target = FootprintCameraFraming.mapRect(
+            coordinates: [coordinate],
+            viewport: layout.viewport,
+            visibleRect: layout.visibleRect
+        ).map({ MKCoordinateRegion($0) }) else { return nil }
+        let ratio = AppConfig.shared.dayRoutePlaybackStopCameraSpanRatio
+        var region = target
+        region.span = MKCoordinateSpan(
+            latitudeDelta: target.span.latitudeDelta * ratio,
+            longitudeDelta: target.span.longitudeDelta * ratio
+        )
+        return isRenderable(region) ? region : nil
+    }
+
+    nonisolated static func isRenderable(_ region: MKCoordinateRegion) -> Bool {
+        guard region.center.isRenderableMapCoordinate else { return false }
+        guard region.span.latitudeDelta.isFinite,
+              region.span.longitudeDelta.isFinite,
+              region.span.latitudeDelta > 0,
+              region.span.longitudeDelta > 0 else { return false }
+        return region.span.latitudeDelta <= 180 && region.span.longitudeDelta <= 360
     }
 }
 
@@ -760,6 +1136,8 @@ private extension CGRect {
 private struct TimelineTrackingSlider: UIViewRepresentable {
     @Binding var value: Double
     let axis: Axis
+    let trackTint: Color
+    let usesSegmentedTrack: Bool
     let onEditingChanged: (Bool) -> Void
 
     func makeCoordinator() -> Coordinator {
@@ -772,14 +1150,23 @@ private struct TimelineTrackingSlider: UIViewRepresentable {
         slider.minimumValue = 0
         slider.maximumValue = 1
         slider.value = Float(value)
-        slider.minimumTrackTintColor = UIColor(Color.dfkAccent)
+        updateTrackColors(slider)
+        // The physical finger is the only scrub truth. Newer UISlider
+        // implementations drive dragging without UIControl tracking
+        // (`beginTracking` / `isTracking`), so reuse the shared non-blocking
+        // touch observer instead of depending on control tracking callbacks.
+        let touchObserver = RouteMapNativeGestureObserver.Coordinator.TouchObserverGestureRecognizer { [weak coordinator = context.coordinator] isTouching in
+            if isTouching {
+                coordinator?.beginEditing()
+            } else {
+                coordinator?.endEditingIfNeeded()
+            }
+        }
+        touchObserver.cancelsTouchesInView = false
+        touchObserver.delaysTouchesBegan = false
+        touchObserver.delaysTouchesEnded = false
+        slider.addGestureRecognizer(touchObserver)
         slider.addTarget(context.coordinator, action: #selector(Coordinator.valueChanged(_:)), for: .valueChanged)
-        slider.addTarget(context.coordinator, action: #selector(Coordinator.beginEditing(_:)), for: .touchDown)
-        slider.addTarget(
-            context.coordinator,
-            action: #selector(Coordinator.finishEditing(_:)),
-            for: [.touchUpInside, .touchUpOutside, .touchCancel]
-        )
         return container
     }
 
@@ -787,7 +1174,8 @@ private struct TimelineTrackingSlider: UIViewRepresentable {
         context.coordinator.parent = self
         container.axis = axis
         let slider = container.slider
-        guard !slider.isTracking else { return }
+        updateTrackColors(slider)
+        guard !slider.isTracking, !context.coordinator.isEditing else { return }
         let updatedValue = Float(value)
         if slider.value != updatedValue {
             slider.setValue(updatedValue, animated: false)
@@ -798,8 +1186,18 @@ private struct TimelineTrackingSlider: UIViewRepresentable {
         coordinator.endEditingIfNeeded()
     }
 
+    private func updateTrackColors(_ slider: UISlider) {
+        if usesSegmentedTrack {
+            slider.minimumTrackTintColor = .clear
+            slider.maximumTrackTintColor = .clear
+        } else {
+            slider.minimumTrackTintColor = UIColor(trackTint)
+            slider.maximumTrackTintColor = UIColor(trackTint.opacity(0.22))
+        }
+    }
+
     final class SliderContainer: UIView {
-        let slider = UISlider(frame: .zero)
+        let slider: UISlider
         var axis: Axis {
             didSet {
                 guard axis != oldValue else { return }
@@ -810,6 +1208,7 @@ private struct TimelineTrackingSlider: UIViewRepresentable {
 
         init(axis: Axis) {
             self.axis = axis
+            self.slider = UISlider(frame: .zero)
             super.init(frame: .zero)
             addSubview(slider)
             clipsToBounds = true
@@ -841,24 +1240,30 @@ private struct TimelineTrackingSlider: UIViewRepresentable {
 
     final class Coordinator: NSObject {
         var parent: TimelineTrackingSlider
-        private var isEditing = false
+        private(set) var isEditing = false
 
         init(parent: TimelineTrackingSlider) {
             self.parent = parent
         }
 
         @objc func valueChanged(_ slider: UISlider) {
-            parent.value = Double(slider.value)
+            // Touch scrubs are already open here: gesture recognizers receive
+            // the touch before the slider does. A change without a touch
+            // (e.g. VoiceOver adjustment) is a discrete seek, so wrap it in its
+            // own begin/end instead of leaving playback stuck paused.
+            if isEditing {
+                parent.value = Double(slider.value)
+            } else {
+                beginEditing()
+                parent.value = Double(slider.value)
+                endEditingIfNeeded()
+            }
         }
 
-        @objc func beginEditing(_: UISlider) {
+        func beginEditing() {
             guard !isEditing else { return }
             isEditing = true
             parent.onEditingChanged(true)
-        }
-
-        @objc func finishEditing(_: UISlider) {
-            endEditingIfNeeded()
         }
 
         func endEditingIfNeeded() {
@@ -874,57 +1279,184 @@ struct TimelinePlaybackScrubber: View {
     @Binding var isPaused: Bool
     @Binding var isScrubbing: Bool
     var axis: Axis = .horizontal
+    var floatingLabel: String? = nil
+    var trackTint: Color = .dfkAccent
+    var trackSegments: [TimelinePlaybackTrackSegment] = []
     let progressAccessibilityLabel: String
     let resumeAccessibilityLabel: String
     let pauseAccessibilityLabel: String
     var onEditingChanged: (Bool) -> Void = { _ in }
 
-    @Environment(\.accessibilityReduceMotion) private var accessibilityReduceMotion
+    @State private var pausedBeforeScrubbing: Bool?
 
     private func beginScrubbing() {
-        guard !isScrubbing else { return }
-        isScrubbing = true
+        // TimelineTrackingSlider.Coordinator already emits begin exactly once
+        // for each physical gesture. Never reject that event based on stale
+        // SwiftUI state: map-driven view refreshes may preserve an unfinished
+        // snapshot after the UIKit slider has already ended or been rebuilt.
+        let wasPaused = isPaused
+        // Give the playback owner a synchronous cancellation point before
+        // publishing any value from this drag.
         onEditingChanged(true)
+        var transaction = Transaction(animation: nil)
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            pausedBeforeScrubbing = wasPaused
+            isPaused = true
+            isScrubbing = true
+        }
     }
 
     private func finishScrubbing() {
-        guard isScrubbing else { return }
-        isScrubbing = false
+        // `isScrubbing` is presentation state and can be reset by a scene or
+        // layout update.  The captured pause state is the authoritative proof
+        // that this drag still needs to be finished.
+        guard isScrubbing || pausedBeforeScrubbing != nil else { return }
+        let shouldRemainPaused = pausedBeforeScrubbing ?? isPaused
+        var transaction = Transaction(animation: nil)
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            isScrubbing = false
+            isPaused = shouldRemainPaused
+            pausedBeforeScrubbing = nil
+        }
         onEditingChanged(false)
     }
 
-    private var progressSlider: some View {
-        TimelineTrackingSlider(
-            value: $progress,
-            axis: axis,
-            onEditingChanged: { isEditing in
-                if isEditing {
-                    beginScrubbing()
+    private func sliderPosition(progress: Double, size: CGSize) -> CGPoint {
+        let inset: CGFloat = 14
+        let boundedProgress = min(max(progress, 0), 1)
+        if axis == .vertical {
+            return CGPoint(
+                x: size.width / 2,
+                y: inset + (1 - boundedProgress) * max(size.height - inset * 2, 1)
+            )
+        }
+        return CGPoint(
+            x: inset + boundedProgress * max(size.width - inset * 2, 1),
+            y: size.height / 2
+        )
+    }
+
+    private func trackColor(for segment: TimelinePlaybackTrackSegment) -> Color {
+        segment.colorHex.flatMap { Color(hex: $0) } ?? trackTint
+    }
+
+    @ViewBuilder
+    private func segmentedTrack(size: CGSize) -> some View {
+        let inset: CGFloat = 14
+        let thickness: CGFloat = 4
+        let boundedProgress = min(max(progress, 0), 1)
+        ZStack(alignment: .topLeading) {
+            ForEach(trackSegments) { segment in
+                let start = min(max(segment.startProgress, 0), 1)
+                let end = min(max(segment.endProgress, start), 1)
+                let reachedEnd = min(max(boundedProgress, start), end)
+                let color = trackColor(for: segment)
+                if axis == .vertical {
+                    let usableLength = max(size.height - inset * 2, 1)
+                    let top = inset + (1 - end) * usableLength
+                    let bottom = inset + (1 - start) * usableLength
+                    let reachedTop = inset + (1 - reachedEnd) * usableLength
+                    Rectangle()
+                        .fill(color.opacity(0.22))
+                        .frame(width: thickness, height: max(bottom - top, 0))
+                        .position(x: size.width / 2, y: (top + bottom) / 2)
+                    if reachedEnd > start {
+                        Rectangle()
+                            .fill(color)
+                            .frame(width: thickness, height: max(bottom - reachedTop, 0))
+                            .position(x: size.width / 2, y: (reachedTop + bottom) / 2)
+                    }
                 } else {
-                    finishScrubbing()
+                    let usableLength = max(size.width - inset * 2, 1)
+                    let leading = inset + start * usableLength
+                    let trailing = inset + end * usableLength
+                    let reachedTrailing = inset + reachedEnd * usableLength
+                    Rectangle()
+                        .fill(color.opacity(0.22))
+                        .frame(width: max(trailing - leading, 0), height: thickness)
+                        .position(x: (leading + trailing) / 2, y: size.height / 2)
+                    if reachedEnd > start {
+                        Rectangle()
+                            .fill(color)
+                            .frame(width: max(reachedTrailing - leading, 0), height: thickness)
+                            .position(x: (leading + reachedTrailing) / 2, y: size.height / 2)
+                    }
                 }
             }
-        )
-        .accessibilityLabel(progressAccessibilityLabel)
+        }
+        .mask {
+            if axis == .vertical {
+                Capsule()
+                    .frame(width: thickness, height: max(size.height - inset * 2, 1))
+                    .position(x: size.width / 2, y: size.height / 2)
+            } else {
+                Capsule()
+                    .frame(width: max(size.width - inset * 2, 1), height: thickness)
+                    .position(x: size.width / 2, y: size.height / 2)
+            }
+        }
+        .allowsHitTesting(false)
+    }
+
+    private var progressSlider: some View {
+        GeometryReader { geometry in
+            ZStack(alignment: .topLeading) {
+                if !trackSegments.isEmpty {
+                    segmentedTrack(size: geometry.size)
+                }
+
+                TimelineTrackingSlider(
+                    value: $progress,
+                    axis: axis,
+                    trackTint: trackTint,
+                    usesSegmentedTrack: !trackSegments.isEmpty,
+                    onEditingChanged: { isEditing in
+                        if isEditing {
+                            beginScrubbing()
+                        } else {
+                            finishScrubbing()
+                        }
+                    }
+                )
+                .accessibilityLabel(progressAccessibilityLabel)
+
+                if let floatingLabel, !floatingLabel.isEmpty {
+                    let thumbPosition = sliderPosition(progress: progress, size: geometry.size)
+                    Text(floatingLabel)
+                        .font(.system(size: 11, weight: .semibold, design: .rounded))
+                        .lineLimit(1)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .dfkDetailMaterial(in: Capsule())
+                        .fixedSize()
+                        .position(
+                            x: axis == .vertical
+                                ? thumbPosition.x - 38
+                                : min(max(thumbPosition.x, 30), max(geometry.size.width - 30, 30)),
+                            y: axis == .vertical
+                                ? min(max(thumbPosition.y, 14), max(geometry.size.height - 14, 14))
+                                : thumbPosition.y - 36
+                        )
+                        .allowsHitTesting(false)
+                }
+            }
+        }
     }
 
     private var pauseButton: some View {
         Button {
             isPaused.toggle()
         } label: {
-            Image(systemName: (isPaused || accessibilityReduceMotion) ? "play.fill" : "pause.fill")
+            Image(systemName: isPaused ? "play.fill" : "pause.fill")
                 .font(.system(size: 14, weight: .bold))
                 .frame(width: 24, height: 24)
         }
         .buttonStyle(.bordered)
         .buttonBorderShape(.circle)
         .tint(.dfkAccent)
-        .disabled(accessibilityReduceMotion)
-        .accessibilityLabel(
-            accessibilityReduceMotion
-                ? "系统已开启减少动态效果"
-                : (isPaused ? resumeAccessibilityLabel : pauseAccessibilityLabel)
-        )
+        .accessibilityLabel(isPaused ? resumeAccessibilityLabel : pauseAccessibilityLabel)
     }
 
     @ViewBuilder
@@ -1653,9 +2185,13 @@ struct TransportModalView: View {
             }
             .task(id: RouteDisplayKey(geometry: displayedTransport.routeGeometryIdentity, type: displayType, revision: inferredRoutesRevision)) {
                 let route = displayedTransport.updatingType(displayType)
+                let routeRenderIdentity = "transport-detail-\(route.id.uuidString)-\(inferredRoutesRevision)"
                 let prepared = await Task.detached(priority: .userInitiated) {
                     let gaps = TransportRouteCompletion.gaps(for: route)
-                    let segments = TransportRouteCompletion.cachedSegments(for: route)
+                    let segments = TransportRouteProgressGeometry.renderableSegments(
+                        TransportRouteCompletion.cachedSegments(for: route),
+                        idPrefix: routeRenderIdentity
+                    )
                     return (
                         segments: segments,
                         animation: TransportRouteAnimation.make(
@@ -1680,29 +2216,37 @@ struct TransportModalView: View {
                 routeAnimationFrameIndex = accessibilityReduceMotion
                     ? prepared.animation.frames.count / 2
                     : 0
+                isRouteAnimationPaused = TimelinePlaybackMotionPolicy.startsPaused(
+                    reduceMotionEnabled: accessibilityReduceMotion
+                )
                 routeAnimationRevision &+= 1
                 editableRouteGaps = prepared.gaps
                 routeTapTargets = prepared.tapTargets
             }
             .task(id: "\(routeAnimationRevision)-\(accessibilityReduceMotion)-\(isRouteAnimationPaused)-\(isRouteAnimationScrubbing)") {
-                if accessibilityReduceMotion {
-                    routeAnimationFrameIndex = routeAnimation.frames.count / 2
-                    return
-                }
                 guard !isRouteAnimationPaused,
                       !isRouteAnimationScrubbing,
                       routeAnimation.frames.count >= 2,
                       routeAnimation.frameInterval > 0 else { return }
-                while !Task.isCancelled {
-                    let isAtEnd = routeAnimationFrameIndex == routeAnimation.frames.count - 1
-                    let delay = isAtEnd ? routeAnimation.endPause : routeAnimation.frameInterval
-                    try? await Task.sleep(for: .seconds(delay))
-                    guard !Task.isCancelled,
-                          !isRouteAnimationScrubbing,
-                          !routeAnimation.frames.isEmpty else { return }
-                    let nextIndex = isAtEnd ? 0 : routeAnimationFrameIndex + 1
-                    setRouteAnimationFrame(nextIndex)
-                }
+                await TimelinePlaybackAdvancePipeline.run(
+                    frameCount: { routeAnimation.frames.count },
+                    frameInterval: { routeAnimation.frameInterval },
+                    endPause: { routeAnimation.endPause },
+                    frameIndex: { routeAnimationFrameIndex },
+                    canAdvance: {
+                        !isRouteAnimationPaused &&
+                            !isRouteAnimationScrubbing
+                    },
+                    resetLoopState: {},
+                    applyFrame: { index in
+                        setRouteAnimationFrame(index)
+                    }
+                )
+            }
+            .onChange(of: accessibilityReduceMotion) { _, reducesMotion in
+                guard reducesMotion else { return }
+                isRouteAnimationPaused = true
+                routeAnimationFrameIndex = routeAnimation.frames.count / 2
             }
             // Cache revisions redraw the map without starting another request.
             // Opening or rebuilding the detail view is automatic loading, not a

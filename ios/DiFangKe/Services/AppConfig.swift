@@ -132,6 +132,7 @@ class AppConfig {
     var transportRouteAnimationMinDuration: Double { double(forKey: "TRANSPORT_ROUTE_ANIMATION_MIN_DURATION") }
     var transportRouteAnimationMaxDuration: Double { double(forKey: "TRANSPORT_ROUTE_ANIMATION_MAX_DURATION") }
     var transportRouteAnimationEndPause: Double { double(forKey: "TRANSPORT_ROUTE_ANIMATION_END_PAUSE") }
+    var mapRoutePlaybackFrameRate: Double { double(forKey: "MAP_ROUTE_PLAYBACK_FRAME_RATE") }
     var dayRoutePlaybackTransportCameraSpanRatio: Double { double(forKey: "DAY_ROUTE_PLAYBACK_TRANSPORT_CAMERA_SPAN_RATIO") }
     var dayRoutePlaybackStopCameraSpanRatio: Double { double(forKey: "DAY_ROUTE_PLAYBACK_STOP_CAMERA_SPAN_RATIO") }
 

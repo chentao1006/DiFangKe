@@ -266,6 +266,7 @@ struct TimelineScene<Content: View>: View {
     @Binding var destination: TimelineDestination?
     let returnToNowRequest: Int
     let onRequestRecords: () -> Void
+    let onPlaybackStateChanged: (Bool) -> Void
     @ViewBuilder let content: (AnyView, AnyView) -> Content
 
     nonisolated private static var initialTimelineVisibleDateBatchSize: Int { 30 }
@@ -370,6 +371,7 @@ struct TimelineScene<Content: View>: View {
     @State private var dayPlaybackVisibleCamera: MapCamera?
     @State private var dayPlaybackPreparationTask: Task<Void, Never>?
     @State private var dayPlaybackScrubFrameTask: Task<Void, Never>?
+    @StateObject private var dayPlaybackScrubGate = TimelinePlaybackScrubGate()
 
 
     private var timelineDates: [Date] {
@@ -413,12 +415,12 @@ struct TimelineScene<Content: View>: View {
         dayPlaybackDate != nil &&
             !isDayPlaybackPaused &&
             !isDayPlaybackControlScrubbing &&
+            !dayPlaybackScrubGate.isActive &&
             !isDayPlaybackFramingRoute &&
             !isDayPlaybackFramingStop &&
             !isTouchingDayPlaybackMap &&
             !isDayPlaybackRecentering &&
-            !isDayPlaybackCoveredByUI &&
-            !accessibilityReduceMotion
+            !isDayPlaybackCoveredByUI
     }
 
     private var dayPlaybackOverlay: DFKMapPlaybackOverlay? {
@@ -436,10 +438,12 @@ struct TimelineScene<Content: View>: View {
             isStop: frame.isStop,
             isMarkerHidden: frame.isStop && (isDayPlaybackFramingStop || isDayPlaybackRecentering),
             travelsWest: frame.travelsWest,
-            highlightedSegments: dayPlaybackHighlightedSegments
+            highlightedSegments: dayPlaybackHighlightedSegments,
+            stopMarkers: dayPlayback.stopMarkers,
+            revealedStopCount: frame.completedStopCount
         )
     }
-    
+
     private var mapPoints: [CLLocationCoordinate2D] {
         guard let key = footprintCameraSourceKey, loadedFootprintCameraKey == key else { return [] }
         return loadedFootprintCameraCoordinates
@@ -484,7 +488,11 @@ struct TimelineScene<Content: View>: View {
             },
             onMapTouchChanged: handleDayPlaybackMapTouch,
             onCameraChanged: { camera, region in
-                if dayPlaybackDate != nil {
+                if dayPlaybackDate != nil,
+                   isTouchingDayPlaybackMap ||
+                    isDayPlaybackRecentering ||
+                    isDayPlaybackFramingRoute ||
+                    isDayPlaybackFramingStop {
                     dayPlaybackVisibleCamera = camera
                     displayedMapRegion = region
                     completeDayPlaybackRecenterIfNeeded(at: camera.centerCoordinate)
@@ -655,13 +663,20 @@ struct TimelineScene<Content: View>: View {
             dayPlaybackScrubFrameTask = nil
             clearDayPlaybackControlScrubCameraWork()
             dayPlaybackVisibleCamera = cameraPosition.camera
-            dayPlayback = prepared
-            dayPlaybackItems = items
-            dayPlaybackDate = normalizedDate
+            // Route replacement is a data swap, not a visual transition.
+            // Letting the surrounding camera animation interpolate MapKit
+            // overlay alpha can send a zero-alpha fill into VectorKit.
+            var mapContentTransaction = Transaction(animation: nil)
+            mapContentTransaction.disablesAnimations = true
+            withTransaction(mapContentTransaction) {
+                dayPlayback = prepared
+                dayPlaybackItems = items
+                dayPlaybackDate = normalizedDate
+                dayPlaybackHighlightedSegments = []
+            }
             activeTimelineDate = normalizedDate
             dayPlaybackFrameIndex = 0
             requestedDayPlaybackFrameIndex = 0
-            dayPlaybackHighlightedSegments = []
             dayPlaybackFramedRouteIndex = nil
             dayPlaybackFramedStopIndex = nil
             dayPlaybackStopFollowRegion = nil
@@ -677,8 +692,11 @@ struct TimelineScene<Content: View>: View {
             dayPlaybackStopFramingTask?.cancel()
             dayPlaybackStopFramingTask = nil
             isDayPlaybackCoveredByUI = isCoveringDayPlaybackUI
-            isDayPlaybackPaused = false
+            isDayPlaybackPaused = TimelinePlaybackMotionPolicy.startsPaused(
+                reduceMotionEnabled: accessibilityReduceMotion
+            )
             isDayPlaybackControlScrubbing = false
+            dayPlaybackScrubGate.setActive(false)
             dayPlaybackRevision &+= 1
             mapInteractionLockedVisibleDates = [normalizedDate]
             visibleTimelineItems = items
@@ -707,14 +725,19 @@ struct TimelineScene<Content: View>: View {
         let previousMapLock = mapInteractionLockBeforeDayPlayback
         let previousActiveDate = activeTimelineDateBeforeDayPlayback
         let reloadDeferredTimelineData = dayPlaybackDefersTimelineReload
-        dayPlayback = .empty
-        dayPlaybackItems = []
-        dayPlaybackDate = nil
+        var mapContentTransaction = Transaction(animation: nil)
+        mapContentTransaction.disablesAnimations = true
+        withTransaction(mapContentTransaction) {
+            dayPlayback = .empty
+            dayPlaybackItems = []
+            dayPlaybackDate = nil
+            dayPlaybackHighlightedSegments = []
+        }
         dayPlaybackFrameIndex = 0
         requestedDayPlaybackFrameIndex = 0
-        dayPlaybackHighlightedSegments = []
         isDayPlaybackPaused = false
         isDayPlaybackControlScrubbing = false
+        dayPlaybackScrubGate.setActive(false)
         dayPlaybackWasRunningBeforeTouch = false
         isTouchingDayPlaybackMap = false
         isDayPlaybackRecentering = false
@@ -765,18 +788,21 @@ struct TimelineScene<Content: View>: View {
         framesSegmentCamera: Bool = true
     ) async {
         guard !Task.isCancelled,
+              !framesSegmentCamera || !dayPlaybackScrubGate.isActive,
               dayPlayback.frames.indices.contains(index) else { return }
         requestedDayPlaybackFrameIndex = index
         let playback = dayPlayback
         let revision = dayPlaybackRevision
-        let highlighted = await Task.detached(priority: .userInitiated) {
-            playback.highlightedSegments(at: index)
-        }.value
+        guard let resolved = await TimelinePlaybackFramePipeline.resolve(
+            playback: playback,
+            index: index
+        ) else { return }
         guard !Task.isCancelled,
               revision == dayPlaybackRevision,
+              !framesSegmentCamera || !dayPlaybackScrubGate.isActive,
               requestedDayPlaybackFrameIndex == index,
               dayPlayback.frames.indices.contains(index) else { return }
-        let frame = dayPlayback.frames[index]
+        let frame = resolved.frame
         if !frame.isStop {
             dayPlaybackFramedStopIndex = nil
             dayPlaybackStopFollowRegion = nil
@@ -798,11 +824,12 @@ struct TimelineScene<Content: View>: View {
         var transaction = Transaction(animation: nil)
         transaction.disablesAnimations = true
         withTransaction(transaction) {
-            dayPlaybackFrameIndex = index
-            dayPlaybackHighlightedSegments = highlighted
+            dayPlaybackFrameIndex = resolved.index
+            dayPlaybackHighlightedSegments = resolved.highlightedSegments
             if !framesSegmentCamera {
                 centerDayPlaybackCamera(frameIndex: index)
-            } else if routeIndexToFrame == nil,
+            } else if !frame.isStop,
+                      routeIndexToFrame == nil,
                       stopIndexToFrame == nil,
                       !isDayPlaybackFramingStop {
                 centerDayPlaybackCamera(frameIndex: index)
@@ -857,13 +884,17 @@ struct TimelineScene<Content: View>: View {
         dayPlaybackWasRunningBeforeRouteFraming = resumesPlaybackAfterFraming
         isDayPlaybackFramingRoute = true
         dayPlaybackRouteFramingTask?.cancel()
+        let isFollowing = followsDayPlayback
         dayPlaybackRouteFramingTask = Task { @MainActor in
             let targetRegion = await Task.detached(priority: .userInitiated) {
-                FootprintCameraFraming.mapRect(
+                DayRoutePlaybackCameraFraming.transportRegion(
                     coordinates: coordinates,
-                    viewport: cameraLayout.viewport,
-                    visibleRect: cameraLayout.visibleRect
-                ).map { MKCoordinateRegion($0) }
+                    layout: DayRoutePlaybackCameraLayout(
+                        viewport: cameraLayout.viewport,
+                        visibleRect: cameraLayout.visibleRect
+                    ),
+                    isFollowing: isFollowing
+                )
             }.value
             guard !Task.isCancelled,
                   dayPlaybackDate != nil,
@@ -874,11 +905,6 @@ struct TimelineScene<Content: View>: View {
                 return
             }
             var transportRegion = targetRegion
-            let cameraSpanRatio = AppConfig.shared.dayRoutePlaybackTransportCameraSpanRatio
-            transportRegion.span = MKCoordinateSpan(
-                latitudeDelta: targetRegion.span.latitudeDelta * cameraSpanRatio,
-                longitudeDelta: targetRegion.span.longitudeDelta * cameraSpanRatio
-            )
             if followsDayPlayback,
                dayPlayback.frames.indices.contains(dayPlaybackFrameIndex) {
                 transportRegion.center = dayPlayback.frames[dayPlaybackFrameIndex].coordinate
@@ -923,11 +949,13 @@ struct TimelineScene<Content: View>: View {
         dayPlaybackStopFramingTask?.cancel()
         dayPlaybackStopFramingTask = Task { @MainActor in
             let targetRegion = await Task.detached(priority: .userInitiated) {
-                FootprintCameraFraming.mapRect(
-                    coordinates: [coordinate],
-                    viewport: viewport,
-                    visibleRect: streetLevelVisibleRect
-                ).map { MKCoordinateRegion($0) }
+                DayRoutePlaybackCameraFraming.stopRegion(
+                    coordinate: coordinate,
+                    layout: DayRoutePlaybackCameraLayout(
+                        viewport: viewport,
+                        visibleRect: streetLevelVisibleRect
+                    )
+                )
             }.value
             guard !Task.isCancelled,
                   dayPlaybackDate != nil,
@@ -938,12 +966,7 @@ struct TimelineScene<Content: View>: View {
                 completeDayPlaybackStopFraming()
                 return
             }
-            let stopCameraSpanRatio = AppConfig.shared.dayRoutePlaybackStopCameraSpanRatio
-            var stopRegion = targetRegion
-            stopRegion.span = MKCoordinateSpan(
-                latitudeDelta: targetRegion.span.latitudeDelta * stopCameraSpanRatio,
-                longitudeDelta: targetRegion.span.longitudeDelta * stopCameraSpanRatio
-            )
+            let stopRegion = targetRegion
             dayPlaybackStopFollowRegion = stopRegion
             let transitionDuration = moveMapCamera(
                 to: stopRegion,
@@ -986,6 +1009,9 @@ struct TimelineScene<Content: View>: View {
             dayPlaybackWasRunningBeforeStopFraming = false
             dayPlaybackWasRunningBeforeTouch = false
         } else {
+            isDayPlaybackControlScrubbing = false
+            isTouchingDayPlaybackMap = false
+            isDayPlaybackRecentering = false
         }
     }
 
@@ -1132,6 +1158,7 @@ struct TimelineScene<Content: View>: View {
             timelineDetent: $timelineDetent,
             isCalendarScrollLocked: $isCalendarScrollLocked,
             isSideBySide: isSideBySide,
+            isPlaybackMinimized: dayPlaybackDate != nil,
             selectedFootprint: $selectedFootprint,
             selectedFootprintStartsExpanded: $selectedFootprintStartsExpanded,
             selectedTransport: $selectedTransport,
@@ -1209,15 +1236,17 @@ struct TimelineScene<Content: View>: View {
     private var dayPlaybackProgress: Binding<Double> {
         Binding(
             get: {
-                guard dayPlayback.frames.count >= 2 else { return 0 }
-                return Double(dayPlaybackFrameIndex) / Double(dayPlayback.frames.count - 1)
+                TimelinePlaybackScrubPipeline.progress(
+                    frameIndex: dayPlaybackFrameIndex,
+                    frameCount: dayPlayback.frames.count
+                )
             },
             set: { progress in
-                guard dayPlayback.frames.count >= 2 else { return }
-                let bounded = min(max(progress, 0), 1)
-                let index = Int((bounded * Double(dayPlayback.frames.count - 1)).rounded())
-                dayPlaybackScrubFrameTask?.cancel()
-                dayPlaybackScrubFrameTask = Task { @MainActor in
+                TimelinePlaybackScrubPipeline.seek(
+                    to: progress,
+                    frameCount: dayPlayback.frames.count,
+                    task: &dayPlaybackScrubFrameTask
+                ) { index in
                     await setDayPlaybackFrame(index, framesSegmentCamera: false)
                 }
             }
@@ -1284,11 +1313,18 @@ struct TimelineScene<Content: View>: View {
             isPaused: $isDayPlaybackPaused,
             isScrubbing: $isDayPlaybackControlScrubbing,
             axis: axis,
+            trackSegments: dayPlayback.trackSegments,
             progressAccessibilityLabel: "全天轨迹播放进度",
             resumeAccessibilityLabel: "继续全天轨迹",
             pauseAccessibilityLabel: "暂停全天轨迹",
-            onEditingChanged: { _ in
-                clearDayPlaybackControlScrubCameraWork()
+            onEditingChanged: { isEditing in
+                TimelinePlaybackScrubLifecycle.update(
+                    isEditing: isEditing,
+                    gate: dayPlaybackScrubGate,
+                    invalidateAutomaticAdvance: { dayPlaybackRevision &+= 1 }
+                ) {
+                    clearDayPlaybackControlScrubCameraWork()
+                }
             }
         )
     }
@@ -1345,8 +1381,15 @@ struct TimelineScene<Content: View>: View {
                 .onAppear {
                     handleTimelineAppear()
                     consumeDestination()
+                    onPlaybackStateChanged(dayPlaybackDate != nil)
                 }
-                .onDisappear(perform: handleTimelineDisappear)
+                .onDisappear {
+                    handleTimelineDisappear()
+                    onPlaybackStateChanged(false)
+                }
+                .onChange(of: dayPlaybackDate != nil) { _, isPlaying in
+                    onPlaybackStateChanged(isPlaying)
+                }
                 .task { await loadInitialTimeline() }
         )
     }
@@ -1355,20 +1398,20 @@ struct TimelineScene<Content: View>: View {
         AnyView(
             timelineSceneLifecycle
                 .task(id: "\(dayPlaybackRevision)-\(canAdvanceDayPlayback)") {
-                    guard canAdvanceDayPlayback,
-                          dayPlayback.frames.count >= 2 else { return }
-                    while !Task.isCancelled {
-                        let isAtEnd = dayPlaybackFrameIndex == dayPlayback.frames.count - 1
-                        let delay = isAtEnd ? dayPlayback.endPause : dayPlayback.frameInterval
-                        try? await Task.sleep(for: .seconds(delay))
-                        guard !Task.isCancelled, canAdvanceDayPlayback else { return }
-                        if isAtEnd {
+                    await TimelinePlaybackAdvancePipeline.run(
+                        frameCount: { dayPlayback.frames.count },
+                        frameInterval: { dayPlayback.frameInterval },
+                        endPause: { dayPlayback.endPause },
+                        frameIndex: { dayPlaybackFrameIndex },
+                        canAdvance: { canAdvanceDayPlayback },
+                        resetLoopState: {
                             dayPlaybackFramedRouteIndex = nil
                             dayPlaybackFramedStopIndex = nil
+                        },
+                        applyFrame: { index in
+                            await setDayPlaybackFrame(index)
                         }
-                        let nextIndex = isAtEnd ? 0 : dayPlaybackFrameIndex + 1
-                        await setDayPlaybackFrame(nextIndex)
-                    }
+                    )
                 }
                 .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("FootprintDataChanged")), perform: handleFootprintDataChanged)
                 .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("DFKDeepLinkNotification"))) { notification in
@@ -3189,6 +3232,7 @@ private struct TimelineView: View {
     @Binding var timelineDetent: PresentationDetent
     @Binding var isCalendarScrollLocked: Bool
     let isSideBySide: Bool
+    let isPlaybackMinimized: Bool
     @Binding var selectedFootprint: Footprint?
     @Binding var selectedFootprintStartsExpanded: Bool
     @Binding var selectedTransport: Transport?
@@ -3215,7 +3259,8 @@ private struct TimelineView: View {
     @State private var selectedMapPhotoAssetIDs: [String] = []
 
     private var isCollapsed: Bool {
-        !isSideBySide && timelineDetent == .height(collapsedTimelineDetentHeight)
+        (!isSideBySide && timelineDetent == .height(collapsedTimelineDetentHeight)) ||
+            (isSideBySide && isPlaybackMinimized)
     }
 
     private var hasCoveringPresentation: Bool {

@@ -36,6 +36,7 @@ struct MainTabView: View {
     @State private var destination: TimelineDestination?
     @State private var usesColumnLayout = false
     @State private var returnToNowRequest = 0
+    @State private var isRecordPlaybackActive = false
 
     private var recordTabIcon: String {
         guard selectedTab == .records else {
@@ -67,7 +68,8 @@ struct MainTabView: View {
                 selectedTransport: $selectedTransport,
                 destination: $destination,
                 returnToNowRequest: returnToNowRequest,
-                onRequestRecords: { selectedTab = .records }
+                onRequestRecords: { selectedTab = .records },
+                onPlaybackStateChanged: { isRecordPlaybackActive = $0 }
             ) { map, records in
                 nativeTabs(records: AnyView(recordScreen(map: map, records: records, usesColumns: usesColumns)))
             }
@@ -95,7 +97,10 @@ struct MainTabView: View {
         if usesColumns {
             NavigationSplitView(columnVisibility: .constant(.all)) {
                 records
-                    .if(UIDevice.current.userInterfaceIdiom == .pad) { view in
+                    .if(isRecordPlaybackActive) { view in
+                        view.navigationSplitViewColumnWidth(min: 240, ideal: 260, max: 280)
+                    }
+                    .if(UIDevice.current.userInterfaceIdiom == .pad && !isRecordPlaybackActive) { view in
                         view.navigationSplitViewColumnWidth(min: 380, ideal: 440, max: 520)
                     }
             } detail: {

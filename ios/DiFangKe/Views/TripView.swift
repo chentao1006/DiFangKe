@@ -8339,6 +8339,82 @@ private struct TripDetailItemValue: Sendable {
     }
 }
 
+/// Immutable input copied from the trip view before playback geometry is
+/// prepared off the main thread.
+private struct TripPlaybackItemSnapshot: @unchecked Sendable {
+    let id: UUID
+    let kind: TripItemKind
+    let startTime: Date
+    let endTime: Date
+    let coordinate: CLLocationCoordinate2D?
+    let symbolName: String
+    let colorHex: String?
+    let transportType: TransportType
+    let route: [CodableCoordinate]
+    let contextLabel: String
+}
+
+private enum TripPlaybackBuilder {
+    nonisolated static func make(items: [TripPlaybackItemSnapshot]) -> DayRoutePlayback {
+        let inputs: [DayRoutePlaybackInput] = items.compactMap { item in
+            guard !Task.isCancelled else { return nil }
+            switch item.kind {
+            case .stop:
+                guard let coordinate = item.coordinate, coordinate.isRenderableMapCoordinate else { return nil }
+                return DayRoutePlaybackInput(
+                    kind: .stop(
+                        coordinate: coordinate,
+                        startTime: item.startTime,
+                        endTime: item.endTime,
+                        symbolName: item.symbolName,
+                        colorHex: item.colorHex
+                    ),
+                    startTime: item.startTime,
+                    contextLabel: item.contextLabel
+                )
+            case .transport:
+                let route = item.route.filter {
+                    let coordinate = CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lon)
+                    return coordinate.isRenderableMapCoordinate
+                }
+                guard route.count >= 2 else { return nil }
+                let coordinates = route.map { CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lon) }
+                var distance: CLLocationDistance = 0
+                for index in 1..<coordinates.count {
+                    distance += CLLocation(latitude: coordinates[index - 1].latitude, longitude: coordinates[index - 1].longitude)
+                        .distance(from: CLLocation(latitude: coordinates[index].latitude, longitude: coordinates[index].longitude))
+                }
+                let duration = max(item.endTime.timeIntervalSince(item.startTime), 1)
+                let pathPoints = route.map {
+                    TransportPathPoint(
+                        coordinate: CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lon),
+                        timestamp: $0.timestamp,
+                        isSyntheticPadding: $0.isSyntheticPadding == true
+                    )
+                }
+                let transport = Transport(
+                    id: item.id,
+                    startTime: item.startTime,
+                    endTime: item.endTime,
+                    startLocation: "",
+                    endLocation: "",
+                    type: item.transportType,
+                    distance: distance,
+                    averageSpeed: distance / duration,
+                    points: coordinates,
+                    pathPoints: pathPoints
+                )
+                return DayRoutePlaybackInput(
+                    kind: .transport(transport),
+                    startTime: item.startTime,
+                    contextLabel: item.contextLabel
+                )
+            }
+        }
+        return DayRoutePlayback.make(inputs: inputs)
+    }
+}
+
 /// A stop cluster without the selection-dependent representative, which the
 /// view resolves cheaply per body.
 private struct TripDetailStopBucket: Sendable {
@@ -8537,6 +8613,8 @@ private struct TripDetailMapModel: Sendable {
 
 struct TripDetailView: View {
     @Environment(\.modelContext) private var context
+    @Environment(\.verticalSizeClass) private var verticalSizeClass
+    @Environment(\.scenePhase) private var scenePhase
     @ObservedObject private var photoService = PhotoService.shared
     let trip: Trip
     var showsLifecycleActions = true
@@ -8579,6 +8657,32 @@ struct TripDetailView: View {
     @State private var visibleTransportMidpoints: [UUID: CLLocationCoordinate2D] = [:]
     /// Transport icons hidden because they touch a same-type icon on screen.
     @State private var mergedTransportMarkerIDs: Set<UUID> = []
+    @State private var tripPlayback = DayRoutePlayback.empty
+    @State private var tripPlaybackFrameIndex = 0
+    @State private var requestedTripPlaybackFrameIndex = 0
+    @State private var tripPlaybackHighlightedSegments: [TransportLineSegment] = []
+    @State private var tripPlaybackRevision = 0
+    @State private var isTripPlaybackPaused = false
+    @State private var isTripPlaybackScrubbing = false
+    @State private var isTripPlaybackCoveredByUI = false
+    @State private var isTouchingTripPlaybackMap = false
+    @State private var isTripPlaybackCameraTransitioning = false
+    @State private var tripPlaybackCameraTransitionTask: Task<Void, Never>?
+    @State private var tripPlaybackCameraTransitionID: UUID?
+    @State private var tripPlaybackFramedRouteIndex: Int?
+    @State private var tripPlaybackFramedStopIndex: Int?
+    @State private var tripPlaybackTransportFollowRegion: MKCoordinateRegion?
+    @State private var tripPlaybackStopFollowRegion: MKCoordinateRegion?
+    @State private var tripPlaybackControlSize: CGSize = .zero
+    @State private var isPreparingTripPlayback = false
+    @State private var tripPlaybackPreparationTask: Task<Void, Never>?
+    @State private var tripPlaybackScrubFrameTask: Task<Void, Never>?
+    @StateObject private var tripPlaybackScrubGate = TimelinePlaybackScrubGate()
+    @State private var tripPlaybackDefersDataRefresh = false
+    @State private var detailDetentBeforeTripPlayback: PresentationDetent?
+    @State private var cameraPositionBeforeTripPlayback: MapCameraPosition?
+    @AppStorage("transportRouteAnimationFollowEnabled") private var followsTripPlayback = false
+    @Environment(\.accessibilityReduceMotion) private var accessibilityReduceMotion
 
     private func liveRow<Model: PersistentModel>(_ object: Model?) -> Model? {
         guard let object, object.modelContext != nil else { return nil }
@@ -8594,6 +8698,41 @@ struct TripDetailView: View {
     private var cities: [TripDayCity] { rowIndex.cityIDs.compactMap { liveRow(cityObjects[$0]) } }
     private var items: [TripItem] { rowIndex.itemIDs.compactMap { liveRow(itemObjects[$0]) } }
     private var displayedItems: [TripItem] { trip.state != .planned ? actualItems : items }
+
+    private var hasPlayableTripRoute: Bool {
+        trip.state != .planned && mapModel.routeSegments.contains { $0.coordinates.count >= 2 }
+    }
+
+    private var canAdvanceTripPlayback: Bool {
+        !tripPlayback.frames.isEmpty &&
+            !isTripPlaybackPaused &&
+            !isTripPlaybackScrubbing &&
+            !tripPlaybackScrubGate.isActive &&
+            !isTripPlaybackCoveredByUI &&
+            !isTouchingTripPlaybackMap &&
+            !isTripPlaybackCameraTransitioning &&
+            scenePhase == .active
+    }
+
+    private var tripPlaybackProgress: Binding<Double> {
+        Binding(
+            get: {
+                TimelinePlaybackScrubPipeline.progress(
+                    frameIndex: tripPlaybackFrameIndex,
+                    frameCount: tripPlayback.frames.count
+                )
+            },
+            set: { value in
+                TimelinePlaybackScrubPipeline.seek(
+                    to: value,
+                    frameCount: tripPlayback.frames.count,
+                    task: &tripPlaybackScrubFrameTask
+                ) { index in
+                    await setTripPlaybackFrame(index, framesSegmentCamera: false)
+                }
+            }
+        )
+    }
 
     private var rowIndexKey: TripDetailRowIndexKey {
         TripDetailRowIndexKey(
@@ -8698,14 +8837,137 @@ struct TripDetailView: View {
     }
 
     private var usesSidebarLayout: Bool {
-        UIDevice.current.userInterfaceIdiom == .pad
+        UIDevice.current.userInterfaceIdiom == .pad || verticalSizeClass == .compact
+    }
+
+    private var sidebarWidth: CGFloat {
+        if !tripPlayback.frames.isEmpty { return 260 }
+        let windowWidth = UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .flatMap(\.windows)
+            .first(where: { $0.isKeyWindow })?
+            .bounds.width ?? 0
+        guard windowWidth > 0 else { return 340 }
+        return min(360, max(300, windowWidth * 0.38))
     }
 
     private var detailSheetPresentation: Binding<Bool> {
         Binding(
             get: { showingSheet && !usesSidebarLayout },
-            set: { showingSheet = $0 }
+            set: { isPresented in
+                // An adaptive sheet is dismissed automatically when rotating
+                // into the landscape sidebar. That is a layout transition,
+                // not a request to discard the already-loaded detail content.
+                if isPresented { showingSheet = true }
+            }
         )
+    }
+
+    @MapContentBuilder
+    private var tripMapContent: some MapContent {
+        if tripPlayback.frames.isEmpty && !mapModel.hasStopItemsWithCoordinates {
+            ForEach(cities) { city in
+                if let latitude = city.latitude, let longitude = city.longitude {
+                    Marker(
+                        city.cityName,
+                        coordinate: CLLocationCoordinate2D(latitude: latitude, longitude: longitude)
+                    )
+                    .tint(trip.state == .planned ? .blue : .orange)
+                }
+            }
+        }
+
+        if tripPlayback.frames.isEmpty {
+            ForEach(mapModel.transportMarkers) { marker in
+                if !mergedTransportMarkerIDs.contains(marker.id) || selectedTimelineItemID == marker.itemID {
+                    Annotation("", coordinate: visibleTransportMidpoints[marker.id] ?? marker.coordinate) {
+                        TripTransportMapMarker(icon: marker.icon, travelsWest: marker.travelsWest)
+                            .mapAnnotationLayer(MapAnnotationLayer.transport)
+                    }
+                }
+            }
+            ForEach(aggregatedStopItems) { group in
+                Annotation("", coordinate: group.coordinate) {
+                    Button {
+                        selectedTimelineItemID = group.representative.id
+                        mapRequestedTimelineItemID = group.representative.id
+                    } label: {
+                        TripFootprintMapMarker(
+                            icon: activityStyle(for: group.representative)?.icon ?? FootprintIconDefaults.map,
+                            tint: activityStyle(for: group.representative).flatMap { Color(hex: $0.colorHex) } ?? Color.dfkAccent,
+                            duration: group.totalDuration,
+                            photoAssetIDs: group.photoAssetIDs,
+                            isSelected: selectedTimelineItemID.map(group.itemIDs.contains) ?? false
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .mapAnnotationLayer(MapAnnotationLayer.footprint)
+                }
+            }
+        } else if let frame = currentTripPlaybackFrame {
+            ForEach(tripPlayback.stopMarkers) { marker in
+                if marker.stopIndex < frame.completedStopCount {
+                    Annotation("", coordinate: marker.coordinate, anchor: .bottom) {
+                        TripFootprintMapMarker(
+                            icon: marker.symbolName,
+                            tint: marker.colorHex.flatMap { Color(hex: $0) } ?? .dfkAccent,
+                            duration: marker.duration,
+                            photoAssetIDs: [],
+                            isSelected: false
+                        )
+                        .mapAnnotationLayer(MapAnnotationLayer.footprint)
+                    }
+                }
+            }
+        }
+
+        if tripPlayback.frames.isEmpty {
+            ForEach(mapModel.routeSegments) { segment in
+                MapPolyline(coordinates: segment.coordinates)
+                    .stroke(
+                        Color.dfkAccent.opacity(segment.isDashed ? 0.4 : 0.7),
+                        style: StrokeStyle(
+                            lineWidth: segment.isDashed ? 1.3 : 3,
+                            lineCap: .round,
+                            lineJoin: .round,
+                            dash: segment.isDashed ? [5, 5] : []
+                        )
+                    )
+            }
+        } else {
+            ForEach(tripPlayback.routeSegments) { segment in
+                MapPolyline(coordinates: segment.coordinates)
+                    .stroke(
+                        Color.dfkAccent.opacity(segment.isDashed ? 0.18 : 0.24),
+                        style: StrokeStyle(
+                            lineWidth: segment.isDashed ? 1.3 : 3,
+                            lineCap: .round,
+                            lineJoin: .round,
+                            dash: segment.isDashed ? [5, 5] : []
+                        )
+                    )
+            }
+        }
+        ForEach(tripPlaybackHighlightedSegments) { segment in
+            MapPolyline(coordinates: segment.coordinates)
+                .stroke(
+                    Color.dfkAccent,
+                    style: StrokeStyle(
+                        lineWidth: segment.isDashed ? 1.5 : 4,
+                        lineCap: .round,
+                        lineJoin: .round,
+                        dash: segment.isDashed ? [5, 5] : []
+                    )
+                )
+        }
+        if let playbackOverlay = tripPlaybackOverlay,
+           !tripPlaybackCentersMarkerOnScreen,
+           !playbackOverlay.isMarkerHidden {
+            Annotation("", coordinate: playbackOverlay.coordinate) {
+                DFKMapPlaybackMarker(playbackOverlay: playbackOverlay)
+                    .mapAnnotationLayer(MapAnnotationLayer.animatedTransport)
+            }
+        }
     }
 
     var body: some View {
@@ -8719,64 +8981,37 @@ struct TripDetailView: View {
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
                     }
                 }
-                .frame(minWidth: 380, idealWidth: 440, maxWidth: 520)
+                .frame(width: sidebarWidth)
                 Divider()
             }
 
             GeometryReader { detailViewport in
                 ZStack(alignment: .bottom) {
                 Map(position: $cameraPosition) {
-            if !mapModel.hasStopItemsWithCoordinates {
-                ForEach(cities) { city in
-                    if let latitude = city.latitude, let longitude = city.longitude {
-                        Marker(city.cityName, coordinate: CLLocationCoordinate2D(latitude: latitude, longitude: longitude))
-                            .tint(trip.state == .planned ? .blue : .orange)
-                    }
-                }
-            }
-            // Transport icons sit below footprints; touching same-type icons
-            // show as one, unless one of them is selected.
-            ForEach(mapModel.transportMarkers) { marker in
-                if !mergedTransportMarkerIDs.contains(marker.id) || selectedTimelineItemID == marker.itemID {
-                    Annotation("", coordinate: visibleTransportMidpoints[marker.id] ?? marker.coordinate) {
-                        TripTransportMapMarker(
-                            icon: marker.icon,
-                            travelsWest: marker.travelsWest
-                        )
-                        .mapAnnotationLayer(MapAnnotationLayer.transport)
-                    }
-                }
-            }
-            ForEach(aggregatedStopItems) { group in
-                Annotation("", coordinate: group.coordinate) {
-                    Button {
-                        selectedTimelineItemID = group.representative.id
-                        mapRequestedTimelineItemID = group.representative.id
-                    } label: {
-                        TripFootprintMapMarker(
-                            // No activity: a plain pin in the theme colour.
-                            icon: activityStyle(for: group.representative)?.icon ?? FootprintIconDefaults.map,
-                            tint: activityStyle(for: group.representative).flatMap { Color(hex: $0.colorHex) } ?? Color.dfkAccent,
-                            duration: group.totalDuration,
-                            photoAssetIDs: group.photoAssetIDs,
-                            isSelected: selectedTimelineItemID.map(group.itemIDs.contains) ?? false
-                        )
-                    }
-                    .buttonStyle(.plain)
-                    .mapAnnotationLayer(MapAnnotationLayer.footprint)
-                }
-            }
-            ForEach(mapModel.routeSegments) { segment in
-                MapPolyline(coordinates: segment.coordinates)
-                    .stroke(
-                        Color.dfkAccent.opacity(segment.isDashed ? 0.4 : 0.7),
-                        style: StrokeStyle(lineWidth: segment.isDashed ? 1.3 : 3, lineCap: .round, lineJoin: .round, dash: segment.isDashed ? [5, 5] : [])
-                    )
+                    tripMapContent
+        }
+        .mapStyle(.standard(
+            elevation: tripPlayback.frames.isEmpty ? .realistic : .flat
+        ))
+        .onMapCameraChange(frequency: .continuous) { context in
+            if tripPlayback.frames.isEmpty || isTouchingTripPlaybackMap {
+                mapVisibleRegion = context.region
             }
         }
-        .mapStyle(.standard(elevation: .realistic))
         .onMapCameraChange(frequency: .onEnd) { context in
-            mapVisibleRegion = context.region
+            if tripPlayback.frames.isEmpty ||
+                isTouchingTripPlaybackMap ||
+                isTripPlaybackCameraTransitioning {
+                mapVisibleRegion = context.region
+            }
+        }
+        .background {
+            if !tripPlayback.frames.isEmpty {
+                RouteMapNativeGestureObserver(
+                    onInteractionChanged: { _, _ in },
+                    onTouchChanged: tripPlaybackMapTouchChanged
+                )
+            }
         }
         .task(id: visibleTransportMidpointKey) {
             await refreshVisibleTransportMidpoints()
@@ -8786,14 +9021,23 @@ struct TripDetailView: View {
                 Color.clear
                     .onAppear {
                         mapViewportSize = proxy.size
-                        fitCamera(to: mapCoordinates)
+                        if tripPlayback.frames.isEmpty { fitCamera(to: mapCoordinates) }
                     }
                     .onChange(of: proxy.size) { _, size in
                         mapViewportSize = size
-                        fitCamera(to: mapCoordinates)
+                        if tripPlayback.frames.isEmpty { fitCamera(to: mapCoordinates) }
                     }
             }
             .allowsHitTesting(false)
+        }
+        .overlay {
+            if tripPlaybackCentersMarkerOnScreen,
+               let playbackOverlay = tripPlaybackOverlay,
+               !playbackOverlay.isMarkerHidden {
+                DFKMapPlaybackMarker(playbackOverlay: playbackOverlay)
+                    .offset(y: playbackOverlay.isStop ? -20 : 0)
+                    .allowsHitTesting(false)
+            }
         }
 
                     Button(action: onClose) {
@@ -8807,6 +9051,39 @@ struct TripDetailView: View {
                     )
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                     .zIndex(20)
+
+                    if !tripPlayback.frames.isEmpty {
+                        tripPlaybackControls
+                            .background {
+                                GeometryReader { controlGeometry in
+                                    Color.clear
+                                        .onAppear { tripPlaybackControlSize = controlGeometry.size }
+                                        .onChange(of: controlGeometry.size) { _, size in
+                                            tripPlaybackControlSize = size
+                                        }
+                                }
+                            }
+                            .padding(.leading, 24)
+                            .padding(
+                                .trailing,
+                                usesSidebarLayout
+                                    ? max(24, currentTrailingSafeAreaInset + 12)
+                                    : 24
+                            )
+                            .padding(
+                                .bottom,
+                                usesSidebarLayout
+                                    ? 0
+                                    : collapsedTimelineDetentHeight + currentBottomSafeAreaInset + 14
+                            )
+                            .frame(
+                                maxWidth: .infinity,
+                                maxHeight: .infinity,
+                                alignment: usesSidebarLayout ? .trailing : .bottom
+                            )
+                            .zIndex(30)
+
+                    }
                 }
             }
             .ignoresSafeArea()
@@ -8817,6 +9094,25 @@ struct TripDetailView: View {
         .onAppear {
             fitCamera(to: mapCoordinates)
         }
+        .task(id: "\(tripPlaybackRevision)-\(canAdvanceTripPlayback)") {
+            await TimelinePlaybackAdvancePipeline.run(
+                frameCount: { tripPlayback.frames.count },
+                frameInterval: { tripPlayback.frameInterval },
+                endPause: { tripPlayback.endPause },
+                frameIndex: { tripPlaybackFrameIndex },
+                canAdvance: { canAdvanceTripPlayback },
+                resetLoopState: {
+                    tripPlaybackFramedRouteIndex = nil
+                    tripPlaybackFramedStopIndex = nil
+                },
+                applyFrame: { index in
+                    await setTripPlaybackFrame(index)
+                }
+            )
+        }
+        .onChange(of: scenePhase) { _, phase in
+            handleTripPlaybackScenePhase(phase)
+        }
         .onChange(of: selectedTimelineItemID) { _, selectedID in
             guard usesSidebarLayout || detailDetent != .large else { return }
             guard let selectedID, let item = displayedItem(selectedID) else { return }
@@ -8826,7 +9122,19 @@ struct TripDetailView: View {
                 fitCamera(to: [CLLocationCoordinate2D(latitude: latitude, longitude: longitude)])
             }
         }
+        .onChange(of: usesSidebarLayout) { _, isSidebar in
+            if !isSidebar, !tripPlayback.frames.isEmpty {
+                detailDetent = .height(collapsedTimelineDetentHeight)
+            }
+        }
         .onChange(of: detailDetent) { _, _ in
+            if !tripPlayback.frames.isEmpty {
+                if detailDetent != .height(collapsedTimelineDetentHeight) {
+                    detailDetentBeforeTripPlayback = nil
+                    stopTripPlayback()
+                }
+                return
+            }
             guard usesSidebarLayout || detailDetent != .large else { return }
             if let selectedID = selectedTimelineItemID,
                let item = displayedItem(selectedID) {
@@ -8874,6 +9182,10 @@ struct TripDetailView: View {
         }
         .task(id: "\(rowIndex.daySignature)#\(recordRefreshVersion)#\(isRowIndexLoaded)#photos:\(photoService.authorizationStatus.rawValue):\(photoService.identifierResolutionRevision)") {
             guard isRowIndexLoaded else { return }
+            if !tripPlayback.frames.isEmpty {
+                tripPlaybackDefersDataRefresh = true
+                return
+            }
             if trip.state != .planned {
                 let requests = rowIndex.actualDayRequests
                 let snapshots = await TripScanManager.shared.actualItems(
@@ -8938,6 +9250,9 @@ struct TripDetailView: View {
         }
         .onDisappear {
             visibleMapUpdateTask?.cancel()
+            tripPlaybackPreparationTask?.cancel()
+            tripPlaybackScrubFrameTask?.cancel()
+            tripPlaybackCameraTransitionTask?.cancel()
         }
     }
 
@@ -8955,7 +9270,21 @@ struct TripDetailView: View {
             selectedTimelineItemID: $selectedTimelineItemID,
             mapRequestedTimelineItemID: $mapRequestedTimelineItemID,
             visibleTimelineItemIDsChanged: { visibleTimelineItemIDs = $0 },
-            onRecordChanged: { recordRefreshVersion &+= 1 }
+            onRecordChanged: { recordRefreshVersion &+= 1 },
+            onPresentationChanged: { isCovered in
+                isTripPlaybackCoveredByUI = isCovered
+                if isCovered {
+                    tripPlaybackCameraTransitionTask?.cancel()
+                    tripPlaybackCameraTransitionTask = nil
+                    tripPlaybackCameraTransitionID = nil
+                    isTripPlaybackCameraTransitioning = false
+                }
+            },
+            canPlay: hasPlayableTripRoute && tripPlayback.frames.isEmpty,
+            isPreparingPlayback: isPreparingTripPlayback,
+            onPlay: startTripPlayback,
+            collapsesAtCompactDetent: !usesSidebarLayout,
+            isPlaybackSidebarMinimized: usesSidebarLayout && !tripPlayback.frames.isEmpty
         )
     }
 
@@ -8964,6 +9293,26 @@ struct TripDetailView: View {
             guard let windowScene = scene as? UIWindowScene else { continue }
             if let keyWindow = windowScene.windows.first(where: { $0.isKeyWindow }) {
                 return keyWindow.safeAreaInsets.top
+            }
+        }
+        return 0
+    }
+
+    private var currentBottomSafeAreaInset: CGFloat {
+        for scene in UIApplication.shared.connectedScenes {
+            guard let windowScene = scene as? UIWindowScene else { continue }
+            if let keyWindow = windowScene.windows.first(where: { $0.isKeyWindow }) {
+                return keyWindow.safeAreaInsets.bottom
+            }
+        }
+        return 0
+    }
+
+    private var currentTrailingSafeAreaInset: CGFloat {
+        for scene in UIApplication.shared.connectedScenes {
+            guard let windowScene = scene as? UIWindowScene else { continue }
+            if let keyWindow = windowScene.windows.first(where: { $0.isKeyWindow }) {
+                return keyWindow.safeAreaInsets.right
             }
         }
         return 0
@@ -8999,6 +9348,496 @@ struct TripDetailView: View {
     private func activityStyle(for item: TripItem) -> TripActivityStyle? {
         guard let value = item.activityTypeValue else { return nil }
         return activityStyles.first { $0.id == value || $0.name == value }
+    }
+
+    private var currentTripPlaybackFrame: DayRoutePlaybackFrame? {
+        guard tripPlayback.frames.indices.contains(tripPlaybackFrameIndex) else { return nil }
+        return tripPlayback.frames[tripPlaybackFrameIndex]
+    }
+
+    private var tripPlaybackCentersMarkerOnScreen: Bool {
+        followsTripPlayback && !isTouchingTripPlaybackMap
+    }
+
+    private var tripPlaybackOverlay: DFKMapPlaybackOverlay? {
+        guard let frame = currentTripPlaybackFrame else { return nil }
+        return DFKMapPlaybackOverlay(
+            coordinate: frame.coordinate,
+            symbolName: frame.symbolName,
+            timeText: tripPlaybackTimeText,
+            markerColor: frame.isStop
+                ? (frame.activityColorHex.flatMap { Color(hex: $0) } ?? .dfkAccent)
+                : .dfkAccent,
+            isStop: frame.isStop,
+            isMarkerHidden: frame.isStop && isTripPlaybackCameraTransitioning,
+            travelsWest: frame.travelsWest,
+            highlightedSegments: tripPlaybackHighlightedSegments,
+            stopMarkers: tripPlayback.stopMarkers,
+            revealedStopCount: frame.completedStopCount
+        )
+    }
+
+    private func startTripPlayback() {
+        guard hasPlayableTripRoute, !isPreparingTripPlayback else { return }
+        tripPlaybackPreparationTask?.cancel()
+        var stylesByValue: [String: TripActivityStyle] = [:]
+        for style in activityStyles {
+            stylesByValue[style.id] = style
+            stylesByValue[style.name] = style
+        }
+        let dayLabels = Dictionary(
+            uniqueKeysWithValues: days.enumerated().map { index, day in
+                (day.id, "第\(index + 1)天")
+            }
+        )
+        let snapshots: [TripPlaybackItemSnapshot] = displayedItems.compactMap { item in
+            guard let startTime = item.startTime, let endTime = item.endTime, endTime >= startTime,
+                  let kind = TripItemKind(rawValue: item.kindRaw) else { return nil }
+            let style = item.activityTypeValue.flatMap { stylesByValue[$0] }
+            let coordinate = item.latitude.flatMap { latitude in
+                item.longitude.map { CLLocationCoordinate2D(latitude: latitude, longitude: $0) }
+            }
+            let route = item.sourceTransportRecordID.flatMap { transportRoutes[$0] } ?? []
+            return TripPlaybackItemSnapshot(
+                id: item.sourceTransportRecordID ?? item.id,
+                kind: kind,
+                startTime: startTime,
+                endTime: endTime,
+                coordinate: coordinate,
+                symbolName: style?.icon ?? FootprintIconDefaults.map,
+                colorHex: style?.colorHex,
+                transportType: item.transportTypeRaw.flatMap(TransportType.init(rawValue:)) ?? .slow,
+                route: route,
+                contextLabel: dayLabels[item.tripDayID] ?? ""
+            )
+        }
+        guard snapshots.contains(where: { $0.kind == .transport && $0.route.count >= 2 }) else { return }
+        isPreparingTripPlayback = true
+        tripPlaybackPreparationTask = Task { @MainActor in
+            let prepared = await Task.detached(priority: .userInitiated) {
+                TripPlaybackBuilder.make(items: snapshots)
+            }.value
+            guard !Task.isCancelled else { return }
+            isPreparingTripPlayback = false
+            guard prepared.frames.count >= 2 else { return }
+            visibleMapUpdateTask?.cancel()
+            visibleMapUpdateTask = nil
+            // Invalidate every pre-playback framing calculation before it can
+            // publish a stale full-trip camera over the playback camera.
+            cameraFitGeneration &+= 1
+            detailDetentBeforeTripPlayback = detailDetent
+            cameraPositionBeforeTripPlayback = cameraPosition
+            selectedTimelineItemID = nil
+            if !usesSidebarLayout {
+                detailDetent = .height(collapsedTimelineDetentHeight)
+            }
+            // A new playback session must not inherit transient blockers from
+            // the previous map/sheet lifecycle. Daily playback establishes the
+            // same clean state before its first frame.
+            tripPlaybackCameraTransitionTask?.cancel()
+            tripPlaybackCameraTransitionTask = nil
+            tripPlaybackCameraTransitionID = nil
+            isTripPlaybackCoveredByUI = false
+            isTouchingTripPlaybackMap = false
+            isTripPlaybackCameraTransitioning = false
+            var mapContentTransaction = Transaction(animation: nil)
+            mapContentTransaction.disablesAnimations = true
+            withTransaction(mapContentTransaction) {
+                tripPlayback = prepared
+                tripPlaybackFrameIndex = 0
+                requestedTripPlaybackFrameIndex = 0
+                tripPlaybackHighlightedSegments = []
+            }
+            tripPlaybackFramedRouteIndex = nil
+            tripPlaybackFramedStopIndex = nil
+            tripPlaybackTransportFollowRegion = nil
+            tripPlaybackStopFollowRegion = nil
+            isTripPlaybackPaused = TimelinePlaybackMotionPolicy.startsPaused(
+                reduceMotionEnabled: accessibilityReduceMotion
+            )
+            isTripPlaybackScrubbing = false
+            tripPlaybackScrubGate.setActive(false)
+            tripPlaybackRevision &+= 1
+            if !followsTripPlayback { fitCamera(to: mapCoordinates) }
+            await setTripPlaybackFrame(0)
+        }
+    }
+
+    private func stopTripPlayback() {
+        tripPlaybackPreparationTask?.cancel()
+        tripPlaybackPreparationTask = nil
+        tripPlaybackScrubFrameTask?.cancel()
+        tripPlaybackScrubFrameTask = nil
+        isPreparingTripPlayback = false
+        guard !tripPlayback.frames.isEmpty else { return }
+        let reloadDeferredData = tripPlaybackDefersDataRefresh
+        let previousDetent = detailDetentBeforeTripPlayback
+        let previousCamera = cameraPositionBeforeTripPlayback
+        cameraFitGeneration &+= 1
+        var mapContentTransaction = Transaction(animation: nil)
+        mapContentTransaction.disablesAnimations = true
+        withTransaction(mapContentTransaction) {
+            tripPlayback = .empty
+            tripPlaybackFrameIndex = 0
+            requestedTripPlaybackFrameIndex = 0
+            tripPlaybackHighlightedSegments = []
+        }
+        tripPlaybackFramedRouteIndex = nil
+        tripPlaybackFramedStopIndex = nil
+        tripPlaybackTransportFollowRegion = nil
+        tripPlaybackStopFollowRegion = nil
+        isTripPlaybackPaused = false
+        isTripPlaybackScrubbing = false
+        tripPlaybackScrubGate.setActive(false)
+        isTripPlaybackCoveredByUI = false
+        isTouchingTripPlaybackMap = false
+        isTripPlaybackCameraTransitioning = false
+        tripPlaybackCameraTransitionTask?.cancel()
+        tripPlaybackCameraTransitionTask = nil
+        tripPlaybackCameraTransitionID = nil
+        tripPlaybackDefersDataRefresh = false
+        detailDetentBeforeTripPlayback = nil
+        cameraPositionBeforeTripPlayback = nil
+        tripPlaybackRevision &+= 1
+        if let previousDetent { detailDetent = previousDetent }
+        if let previousCamera {
+            withAnimation(.easeInOut(duration: 0.45)) {
+                cameraPosition = previousCamera
+            }
+        }
+        if reloadDeferredData {
+            recordRefreshVersion &+= 1
+        }
+    }
+
+    private func setTripPlaybackFrame(
+        _ index: Int,
+        framesSegmentCamera: Bool = true
+    ) async {
+        guard !framesSegmentCamera ||
+                (!isTripPlaybackScrubbing && !tripPlaybackScrubGate.isActive) else { return }
+        guard tripPlayback.frames.indices.contains(index) else { return }
+        requestedTripPlaybackFrameIndex = index
+        let playback = tripPlayback
+        let revision = tripPlaybackRevision
+        guard let resolved = await TimelinePlaybackFramePipeline.resolve(
+            playback: playback,
+            index: index
+        ) else { return }
+        guard !Task.isCancelled, revision == tripPlaybackRevision,
+              !framesSegmentCamera ||
+                (!isTripPlaybackScrubbing && !tripPlaybackScrubGate.isActive),
+              requestedTripPlaybackFrameIndex == index,
+              tripPlayback.frames.indices.contains(index) else { return }
+        let frame = resolved.frame
+        var transaction = Transaction(animation: nil)
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            tripPlaybackFrameIndex = resolved.index
+            tripPlaybackHighlightedSegments = resolved.highlightedSegments
+            if !framesSegmentCamera, followsTripPlayback {
+                centerTripPlaybackCamera(on: frame, animated: false)
+            }
+        }
+        guard framesSegmentCamera else { return }
+        if let routeIndex = frame.activeRouteIndex,
+           routeIndex != tripPlaybackFramedRouteIndex {
+            frameTripPlaybackRoute(routeIndex, frame: frame)
+        } else if let stopIndex = frame.stopIndex,
+                  stopIndex != tripPlaybackFramedStopIndex {
+            frameTripPlaybackStop(stopIndex, frame: frame)
+        } else if followsTripPlayback, !frame.isStop {
+            centerTripPlaybackCamera(on: frame, animated: false)
+        }
+    }
+
+    private func handleTripPlaybackScenePhase(_ phase: ScenePhase) {
+        guard !tripPlayback.frames.isEmpty else { return }
+        tripPlaybackScrubFrameTask?.cancel()
+        tripPlaybackScrubFrameTask = nil
+        tripPlaybackCameraTransitionTask?.cancel()
+        tripPlaybackCameraTransitionTask = nil
+        tripPlaybackCameraTransitionID = nil
+        isTripPlaybackCameraTransitioning = false
+        tripPlaybackScrubGate.setActive(false)
+        guard phase == .active else { return }
+
+        isTripPlaybackScrubbing = false
+        isTouchingTripPlaybackMap = false
+    }
+
+    private func centerTripPlaybackCamera(
+        on frame: DayRoutePlaybackFrame,
+        animated: Bool
+    ) {
+        guard var region = frame.isStop
+                ? (tripPlaybackStopFollowRegion ?? mapVisibleRegion ?? cameraPosition.region)
+                : (tripPlaybackTransportFollowRegion ?? mapVisibleRegion ?? cameraPosition.region)
+        else { return }
+        region.center = frame.coordinate
+        if animated {
+            withAnimation(.easeInOut(duration: 0.35)) {
+                cameraPosition = .region(region)
+            }
+        } else {
+            var transaction = Transaction(animation: nil)
+            transaction.disablesAnimations = true
+            withTransaction(transaction) {
+                cameraPosition = .region(region)
+            }
+        }
+    }
+
+    private func tripPlaybackMapTouchChanged(_ isTouching: Bool) {
+        if isTripPlaybackScrubbing {
+            isTouchingTripPlaybackMap = false
+            return
+        }
+        guard followsTripPlayback, isTouchingTripPlaybackMap != isTouching else { return }
+        if isTouching {
+            tripPlaybackCameraTransitionTask?.cancel()
+            tripPlaybackCameraTransitionTask = nil
+            tripPlaybackCameraTransitionID = nil
+            isTripPlaybackCameraTransitioning = false
+            tripPlaybackTransportFollowRegion = nil
+            tripPlaybackStopFollowRegion = nil
+        }
+        isTouchingTripPlaybackMap = isTouching
+        guard !isTouching else { return }
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 50_000_000)
+            guard !Task.isCancelled, !isTouchingTripPlaybackMap,
+                  followsTripPlayback, let frame = currentTripPlaybackFrame else { return }
+            beginTripPlaybackCameraTransition(to: frame)
+        }
+    }
+
+    private func tripPlaybackCameraLayout() -> DayRoutePlaybackCameraLayout? {
+        let viewport = mapViewportSize
+        guard viewport.width > 1, viewport.height > 1 else { return nil }
+        let leadingInset = viewport.width * 0.08
+        let trailingInset = usesSidebarLayout
+            ? max(
+                viewport.width * 0.08,
+                tripPlaybackControlSize.width + max(40, currentTrailingSafeAreaInset + 32)
+            )
+            : leadingInset
+        let topInset = viewport.height * 0.10
+        let sheetInset = usesSidebarLayout
+            ? 24
+            : collapsedTimelineDetentHeight + currentBottomSafeAreaInset + 14
+        let bottomInset = sheetInset + max(tripPlaybackControlSize.height, 48) + 16
+        let visibleHeight = max(viewport.height - topInset - bottomInset, viewport.height * 0.25)
+        return DayRoutePlaybackCameraLayout(
+            viewport: viewport,
+            visibleRect: CGRect(
+                x: leadingInset,
+                y: topInset,
+                width: viewport.width - leadingInset - trailingInset,
+                height: visibleHeight
+            )
+        )
+    }
+
+    private func frameTripPlaybackRoute(
+        _ routeIndex: Int,
+        frame: DayRoutePlaybackFrame
+    ) {
+        tripPlaybackFramedRouteIndex = routeIndex
+        tripPlaybackFramedStopIndex = nil
+        tripPlaybackStopFollowRegion = nil
+        tripPlaybackTransportFollowRegion = nil
+        guard tripPlayback.routeGeometries.indices.contains(routeIndex),
+              let layout = tripPlaybackCameraLayout() else { return }
+        let coordinates = tripPlayback.routeGeometries[routeIndex].coordinates
+        guard coordinates.count >= 2 else { return }
+        let isFollowing = followsTripPlayback
+        startTripPlaybackCameraTransition { transitionID in
+            let prepared = await Task.detached(priority: .userInitiated) {
+                DayRoutePlaybackCameraFraming.transportRegion(
+                    coordinates: coordinates,
+                    layout: layout,
+                    isFollowing: isFollowing
+                )
+            }.value
+            guard !Task.isCancelled,
+                  tripPlaybackFramedRouteIndex == routeIndex,
+                  tripPlaybackCameraTransitionID == transitionID,
+                  var target = prepared else { return }
+            if followsTripPlayback {
+                target.center = frame.coordinate
+                tripPlaybackTransportFollowRegion = target
+            }
+            withAnimation(.easeInOut(duration: 0.5)) {
+                cameraPosition = .region(target)
+            }
+            try? await Task.sleep(nanoseconds: 500_000_000)
+            guard !Task.isCancelled,
+                  tripPlaybackFramedRouteIndex == routeIndex,
+                  tripPlaybackCameraTransitionID == transitionID else { return }
+        }
+    }
+
+    private func frameTripPlaybackStop(
+        _ stopIndex: Int,
+        frame: DayRoutePlaybackFrame
+    ) {
+        tripPlaybackFramedStopIndex = stopIndex
+        tripPlaybackFramedRouteIndex = nil
+        tripPlaybackTransportFollowRegion = nil
+        tripPlaybackStopFollowRegion = nil
+        guard let layout = tripPlaybackCameraLayout() else { return }
+        startTripPlaybackCameraTransition { transitionID in
+            let prepared = await Task.detached(priority: .userInitiated) {
+                DayRoutePlaybackCameraFraming.stopRegion(
+                    coordinate: frame.coordinate,
+                    layout: layout
+                )
+            }.value
+            guard !Task.isCancelled,
+                  tripPlaybackFramedStopIndex == stopIndex,
+                  tripPlaybackCameraTransitionID == transitionID,
+                  var target = prepared else { return }
+            if followsTripPlayback {
+                target.center = frame.coordinate
+                tripPlaybackStopFollowRegion = target
+            }
+            withAnimation(.easeInOut(duration: 0.5)) {
+                cameraPosition = .region(target)
+            }
+            try? await Task.sleep(nanoseconds: 500_000_000)
+            guard !Task.isCancelled,
+                  tripPlaybackFramedStopIndex == stopIndex,
+                  tripPlaybackCameraTransitionID == transitionID else { return }
+        }
+    }
+
+    private func beginTripPlaybackCameraTransition(to frame: DayRoutePlaybackFrame) {
+        startTripPlaybackCameraTransition { transitionID in
+            centerTripPlaybackCamera(on: frame, animated: true)
+            try? await Task.sleep(nanoseconds: 350_000_000)
+            guard !Task.isCancelled,
+                  tripPlaybackCameraTransitionID == transitionID else { return }
+        }
+    }
+
+    private func startTripPlaybackCameraTransition(
+        _ operation: @escaping @MainActor (UUID) async -> Void
+    ) {
+        tripPlaybackCameraTransitionTask?.cancel()
+        let transitionID = UUID()
+        tripPlaybackCameraTransitionID = transitionID
+        isTripPlaybackCameraTransitioning = true
+        tripPlaybackCameraTransitionTask = Task { @MainActor in
+            await operation(transitionID)
+            guard tripPlaybackCameraTransitionID == transitionID else { return }
+            tripPlaybackCameraTransitionID = nil
+            isTripPlaybackCameraTransitioning = false
+            tripPlaybackCameraTransitionTask = nil
+            // Force the advance task to be recreated after framing, even if
+            // SwiftUI coalesces the transient boolean state updates.
+            tripPlaybackRevision &+= 1
+        }
+    }
+
+    private var tripPlaybackTimeText: String {
+        guard let frame = currentTripPlaybackFrame else { return "" }
+        let components = Calendar.current.dateComponents([.hour, .minute], from: frame.timestamp)
+        return String(format: "%02d:%02d", components.hour ?? 0, components.minute ?? 0)
+    }
+
+    private func clearTripPlaybackControlScrubCameraWork() {
+        tripPlaybackCameraTransitionTask?.cancel()
+        tripPlaybackCameraTransitionTask = nil
+        tripPlaybackCameraTransitionID = nil
+        isTripPlaybackCameraTransitioning = false
+        isTouchingTripPlaybackMap = false
+    }
+
+    private var tripPlaybackDayLabel: String? {
+        guard let label = currentTripPlaybackFrame?.contextLabel, !label.isEmpty else { return nil }
+        return label
+    }
+
+    private var tripPlaybackFollowButton: some View {
+        Button {
+            followsTripPlayback.toggle()
+            if followsTripPlayback, let frame = currentTripPlaybackFrame {
+                beginTripPlaybackCameraTransition(to: frame)
+            } else {
+                tripPlaybackCameraTransitionTask?.cancel()
+                tripPlaybackCameraTransitionTask = nil
+                tripPlaybackCameraTransitionID = nil
+                isTripPlaybackCameraTransitioning = false
+                isTouchingTripPlaybackMap = false
+            }
+        } label: {
+            Image(systemName: "plus.viewfinder")
+                .font(.system(size: 14, weight: .bold))
+                .foregroundStyle(followsTripPlayback ? Color.white : Color.dfkAccent)
+                .frame(width: 32, height: 32)
+                .background(Circle().fill(followsTripPlayback ? Color.dfkAccent : Color.secondary.opacity(0.12)))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(followsTripPlayback ? "关闭镜头跟随" : "开启镜头跟随")
+    }
+
+    private func tripPlaybackScrubber(axis: Axis) -> some View {
+        TimelinePlaybackScrubber(
+            progress: tripPlaybackProgress,
+            isPaused: $isTripPlaybackPaused,
+            isScrubbing: $isTripPlaybackScrubbing,
+            axis: axis,
+            floatingLabel: tripPlaybackDayLabel,
+            trackSegments: tripPlayback.trackSegments,
+            progressAccessibilityLabel: "行程轨迹播放进度",
+            resumeAccessibilityLabel: "继续播放行程轨迹",
+            pauseAccessibilityLabel: "暂停播放行程轨迹",
+            onEditingChanged: { isEditing in
+                TimelinePlaybackScrubLifecycle.update(
+                    isEditing: isEditing,
+                    gate: tripPlaybackScrubGate,
+                    invalidateAutomaticAdvance: { tripPlaybackRevision &+= 1 }
+                ) {
+                    clearTripPlaybackControlScrubCameraWork()
+                }
+            }
+        )
+    }
+
+    private var tripPlaybackCloseButton: some View {
+        Button(action: stopTripPlayback) {
+            Image(systemName: "xmark")
+                .font(.system(size: 14, weight: .bold))
+                .frame(width: 24, height: 24)
+        }
+        .buttonStyle(.bordered)
+        .buttonBorderShape(.circle)
+        .tint(.secondary)
+        .accessibilityLabel("关闭行程轨迹播放")
+    }
+
+    @ViewBuilder
+    private var tripPlaybackControls: some View {
+        Group {
+            if usesSidebarLayout {
+                VStack(spacing: 12) {
+                    tripPlaybackFollowButton
+                    tripPlaybackScrubber(axis: .vertical)
+                    tripPlaybackCloseButton
+                }
+            } else {
+                HStack(spacing: 12) {
+                    tripPlaybackFollowButton
+                    tripPlaybackScrubber(axis: .horizontal)
+                    tripPlaybackCloseButton
+                }
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 8)
+        .dfkDetailMaterial(in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .shadow(color: .black.opacity(0.08), radius: 6, y: 2)
     }
 
     private func fitCamera(to coordinates: [CLLocationCoordinate2D]) {
@@ -9179,7 +10018,10 @@ struct TripMapRouteSegment: Identifiable {
     static func make(sourceID: UUID, points: [CodableCoordinate], typeRaw: String? = nil) -> [TripMapRouteSegment] {
         if let typeRaw {
             let transport = TransportRouteCompletion.transport(id: sourceID, typeRaw: typeRaw, points: points)
-            return TransportRouteCompletion.cachedSegments(for: transport).map {
+            return TransportRouteProgressGeometry.renderableSegments(
+                TransportRouteCompletion.cachedSegments(for: transport),
+                idPrefix: "trip-\(sourceID.uuidString)"
+            ).map {
                 .init(id: $0.id, coordinates: $0.coordinates, isDashed: $0.isDashed)
             }
         }
@@ -9202,13 +10044,19 @@ struct TripMapRouteSegment: Identifiable {
             if currentDashed == dashed {
                 chunk.append(secondCoordinate)
             } else {
-                result.append(.init(id: "\(sourceID)-\(result.count)", coordinates: chunk.smoothed(), isDashed: currentDashed!))
+                let coordinates = TransportRouteProgressGeometry.renderableCoordinates(chunk.smoothed())
+                if coordinates.count >= 2 {
+                    result.append(.init(id: "\(sourceID)-\(result.count)", coordinates: coordinates, isDashed: currentDashed!))
+                }
                 chunk = [firstCoordinate, secondCoordinate]
                 currentDashed = dashed
             }
         }
         if let currentDashed, chunk.count > 1 {
-            result.append(.init(id: "\(sourceID)-\(result.count)", coordinates: chunk.smoothed(), isDashed: currentDashed))
+            let coordinates = TransportRouteProgressGeometry.renderableCoordinates(chunk.smoothed())
+            if coordinates.count >= 2 {
+                result.append(.init(id: "\(sourceID)-\(result.count)", coordinates: coordinates, isDashed: currentDashed))
+            }
         }
         return result
     }
@@ -9312,6 +10160,12 @@ private struct TripDetailSheet: View {
     @Binding var mapRequestedTimelineItemID: UUID?
     let visibleTimelineItemIDsChanged: (Set<UUID>) -> Void
     let onRecordChanged: () -> Void
+    let onPresentationChanged: (Bool) -> Void
+    let canPlay: Bool
+    let isPreparingPlayback: Bool
+    let onPlay: () -> Void
+    let collapsesAtCompactDetent: Bool
+    let isPlaybackSidebarMinimized: Bool
     @State private var showingEditor = false
     @State private var activityStyles: [TripActivityStyle] = []
     @State private var followsVisibleTimelineContent = false
@@ -9326,7 +10180,18 @@ private struct TripDetailSheet: View {
     @State private var sharePayload: DFKShareCardPayload?
 
     private var isCollapsed: Bool {
-        detent == .height(collapsedTimelineDetentHeight)
+        (collapsesAtCompactDetent && detent == .height(collapsedTimelineDetentHeight)) ||
+            isPlaybackSidebarMinimized
+    }
+
+    private var coveringPresentationKey: String {
+        if showingEditor { return "editor" }
+        if sharePayload != nil { return "share" }
+        if selectedFootprint != nil { return "footprint" }
+        if selectedTransport != nil { return "transport" }
+        if activityPickerPresentation != nil { return "activity" }
+        if showingEndConfirmation { return "end-confirmation" }
+        return "none"
     }
 
     private var visibleDayEntries: [(offset: Int, element: TripDay)] {
@@ -9405,7 +10270,18 @@ private struct TripDetailSheet: View {
                         Text(headerSubtitle).font(.caption).foregroundStyle(.secondary)
                     }
                 }
-                ToolbarItem(placement: .primaryAction) {
+                ToolbarItemGroup(placement: .primaryAction) {
+                    if canPlay {
+                        Button(action: onPlay) {
+                            if isPreparingPlayback {
+                                ProgressView()
+                            } else {
+                                Image(systemName: "play.fill")
+                            }
+                        }
+                        .disabled(isPreparingPlayback)
+                        .accessibilityLabel("播放行程轨迹")
+                    }
                     Button(action: prepareTripShare) {
                         Image(systemName: "square.and.arrow.up")
                     }
@@ -9417,6 +10293,12 @@ private struct TripDetailSheet: View {
             IsolatedTripEditorHost(container: context.container, tripID: trip.id)
                 .presentationDetents([.large])
                 .presentationDragIndicator(.visible)
+        }
+        .onChange(of: coveringPresentationKey) { _, key in
+            onPresentationChanged(key != "none")
+        }
+        .onDisappear {
+            onPresentationChanged(false)
         }
         .sheet(item: $sharePayload) { _ in
             DFKShareCardSheet(payload: $sharePayload)

@@ -92,7 +92,7 @@ private struct DFKReviewTransportGeometry {
                 ))
             }
             for segment in segments {
-                let coordinates = segment.coordinates.filter(\.isRenderableMapCoordinate)
+                let coordinates = TransportRouteProgressGeometry.renderableCoordinates(segment.coordinates)
                 guard coordinates.count >= 2 else { continue }
                 let step = max(1, coordinates.count / 24)
                 var sampled = stride(from: 0, to: coordinates.count, by: step).map { coordinates[$0] }
@@ -523,8 +523,13 @@ private enum DFKMapContentBuilder {
     }
 
     static func display(for transport: Transport) -> DFKMapTransportDisplay {
-        let segments = TransportRouteCompletion.cachedSegments(for: transport)
-        let smoothedPoints = segments.flatMap(\.coordinates).filter(\.isRenderableMapCoordinate)
+        let segments = TransportRouteProgressGeometry.renderableSegments(
+            TransportRouteCompletion.cachedSegments(for: transport),
+            idPrefix: "map-\(transport.id.uuidString)"
+        )
+        let smoothedPoints = TransportRouteProgressGeometry.renderableCoordinates(
+            segments.flatMap(\.coordinates)
+        )
         return DFKMapTransportDisplay(
             transport: transport,
             segments: segments,
@@ -1409,6 +1414,64 @@ struct DFKMapPlaybackOverlay: @unchecked Sendable {
     let isMarkerHidden: Bool
     let travelsWest: Bool
     let highlightedSegments: [TransportLineSegment]
+    let stopMarkers: [DayRoutePlaybackStopMarker]
+    let revealedStopCount: Int
+}
+
+/// The single marker implementation used by every route playback surface.
+/// Follow mode places this view at screen center; free mode places the same
+/// view in a map annotation.
+struct DFKMapPlaybackMarker: View {
+    let playbackOverlay: DFKMapPlaybackOverlay
+
+    var body: some View {
+        Group {
+            if playbackOverlay.isStop {
+                let constantScale: CGFloat = 1.32
+                let size: CGFloat = 25 * constantScale
+                let iconSize: CGFloat = (playbackOverlay.symbolName == FootprintIconDefaults.card ? 18 : 10) * constantScale
+                DFKFootprintMapMarker(
+                    size: size,
+                    constantScale: constantScale,
+                    activityColor: playbackOverlay.markerColor,
+                    iconColor: .white,
+                    iconName: playbackOverlay.symbolName,
+                    iconSize: iconSize,
+                    photoImage: nil,
+                    durationTuple: (playbackOverlay.timeText, ""),
+                    fontSize: 6.5 * constantScale
+                )
+                .scaleEffect(1.5, anchor: .bottom)
+            } else {
+                let markerColor = playbackOverlay.markerColor
+                ZStack(alignment: .top) {
+                    Circle()
+                        .fill(Color(uiColor: .systemBackground))
+                        .frame(width: 30, height: 30)
+                        .overlay(Circle().stroke(markerColor, lineWidth: 1.5))
+                        .shadow(color: .black.opacity(0.18), radius: 3, y: 2)
+                        .overlay {
+                            Image(systemName: playbackOverlay.symbolName)
+                                .font(.system(size: 15, weight: .bold))
+                                .foregroundStyle(markerColor)
+                                .scaleEffect(x: playbackOverlay.travelsWest ? -1 : 1, y: 1)
+                        }
+                    Text(playbackOverlay.timeText)
+                        .font(.system(size: 9, weight: .bold, design: .rounded))
+                        .lineLimit(1)
+                        .foregroundStyle(markerColor)
+                        .padding(.horizontal, 3)
+                        .padding(.vertical, 1)
+                        .background(RoundedRectangle(cornerRadius: 3).fill(Color(uiColor: .systemBackground)))
+                        .overlay(RoundedRectangle(cornerRadius: 3).stroke(markerColor, lineWidth: 0.5))
+                        .offset(y: 25)
+                }
+                .frame(width: 48, height: 42, alignment: .top)
+                .offset(y: 6)
+            }
+        }
+        .accessibilityHidden(true)
+    }
 }
 
 struct DFKMapView: View {
@@ -2212,7 +2275,10 @@ struct DFKMapView: View {
                                         )
                                     }
                                 }
-                                .mapStyle(.standard(elevation: .automatic, emphasis: .muted))
+                                .mapStyle(.standard(
+                                    elevation: playbackOverlay == nil ? .automatic : .flat,
+                                    emphasis: .muted
+                                ))
                                 .overlay {
                                     if centersPlaybackMarkerOnScreen,
                                        let playbackOverlay,
@@ -2666,6 +2732,19 @@ struct DFKMapView: View {
     @MapContentBuilder
     private func playbackMapContent() -> some MapContent {
         if let playbackOverlay {
+            ForEach(playbackOverlay.stopMarkers) { marker in
+                if marker.stopIndex < playbackOverlay.revealedStopCount {
+                    Annotation("", coordinate: marker.coordinate, anchor: .bottom) {
+                        standardFootprintMarker(
+                            activityColor: marker.colorHex.flatMap { Color(hex: $0) } ?? .gray,
+                            iconName: marker.symbolName,
+                            photoImage: nil,
+                            duration: marker.duration
+                        )
+                        .mapAnnotationLayer(MapAnnotationLayer.footprint)
+                    }
+                }
+            }
             ForEach(playbackOverlay.highlightedSegments) { segment in
                 MapPolyline(coordinates: segment.coordinates)
                     .stroke(
@@ -2693,45 +2772,7 @@ struct DFKMapView: View {
 
     @ViewBuilder
     private func playbackMarkerContent(for playbackOverlay: DFKMapPlaybackOverlay) -> some View {
-        Group {
-            if playbackOverlay.isStop {
-                standardFootprintMarker(
-                    activityColor: playbackOverlay.markerColor,
-                    iconName: playbackOverlay.symbolName,
-                    photoImage: nil,
-                    duration: 0,
-                    labelTuple: (playbackOverlay.timeText, "")
-                )
-                .scaleEffect(1.5, anchor: .bottom)
-            } else {
-                let markerColor = playbackOverlay.markerColor
-                ZStack(alignment: .top) {
-                    Circle()
-                        .fill(Color(uiColor: .systemBackground))
-                        .frame(width: 30, height: 30)
-                        .overlay(Circle().stroke(markerColor, lineWidth: 1.5))
-                        .shadow(color: .black.opacity(0.18), radius: 3, y: 2)
-                        .overlay {
-                            Image(systemName: playbackOverlay.symbolName)
-                                .font(.system(size: 15, weight: .bold))
-                                .foregroundStyle(markerColor)
-                                .scaleEffect(x: playbackOverlay.travelsWest ? -1 : 1, y: 1)
-                        }
-                    Text(playbackOverlay.timeText)
-                        .font(.system(size: 9, weight: .bold, design: .rounded))
-                        .lineLimit(1)
-                        .foregroundStyle(markerColor)
-                        .padding(.horizontal, 3)
-                        .padding(.vertical, 1)
-                        .background(RoundedRectangle(cornerRadius: 3).fill(Color(uiColor: .systemBackground)))
-                        .overlay(RoundedRectangle(cornerRadius: 3).stroke(markerColor, lineWidth: 0.5))
-                        .offset(y: 25)
-                }
-                .frame(width: 48, height: 42, alignment: .top)
-                .offset(y: 6)
-            }
-        }
-        .accessibilityHidden(true)
+        DFKMapPlaybackMarker(playbackOverlay: playbackOverlay)
     }
 
 
