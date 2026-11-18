@@ -119,6 +119,39 @@ extension DFKShareCardPayload {
 
 /// Units, type and brand footer shared by every template. Templates are drawn
 /// on a 360 pt artboard and rendered on a 1080 wide canvas.
+struct DFKShareBrandIdentity: View {
+    let brandName: String
+    let brandSlogan: String
+    let logoSize: CGFloat
+    let logoCornerRadius: CGFloat
+    let nameFont: Font
+    let sloganFont: Font
+    let foreground: Color
+    let secondary: Color
+    let spacing: CGFloat
+    let textSpacing: CGFloat
+
+    var body: some View {
+        HStack(alignment: .center, spacing: spacing) {
+            Image("AppLogo")
+                .resizable()
+                .scaledToFit()
+                .frame(width: logoSize, height: logoSize)
+                .clipShape(RoundedRectangle(cornerRadius: logoCornerRadius))
+            VStack(alignment: .leading, spacing: textSpacing) {
+                Text(brandName)
+                    .font(nameFont)
+                    .foregroundStyle(foreground)
+                    .lineLimit(1)
+                Text(brandSlogan)
+                    .font(sloganFont)
+                    .foregroundStyle(secondary)
+                    .lineLimit(1)
+            }
+        }
+    }
+}
+
 struct DFKShareTemplateStyle {
     var displayScale: CGFloat
     var brandName: String
@@ -166,19 +199,18 @@ struct DFKShareTemplateStyle {
 
     func footer<QRCode: View>(qrCode: QRCode, foreground: Color, secondary: Color) -> some View {
         HStack(alignment: .center, spacing: u(10)) {
-            Image("AppLogo")
-                .resizable()
-                .scaledToFit()
-                .frame(width: u(30), height: u(30))
-                .clipShape(RoundedRectangle(cornerRadius: u(7)))
-            VStack(alignment: .leading, spacing: u(1)) {
-                Text(brandName)
-                    .font(sans(13, .semibold))
-                    .foregroundStyle(foreground)
-                Text(brandSlogan)
-                    .font(sans(10))
-                    .foregroundStyle(secondary)
-            }
+            DFKShareBrandIdentity(
+                brandName: brandName,
+                brandSlogan: brandSlogan,
+                logoSize: u(30),
+                logoCornerRadius: u(7),
+                nameFont: sans(13, .semibold),
+                sloganFont: sans(10),
+                foreground: foreground,
+                secondary: secondary,
+                spacing: u(10),
+                textSpacing: u(1)
+            )
             Spacer(minLength: 0)
             qrCode.frame(width: u(44), height: u(44))
         }

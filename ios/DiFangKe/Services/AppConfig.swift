@@ -133,6 +133,21 @@ class AppConfig {
     var transportRouteAnimationMaxDuration: Double { double(forKey: "TRANSPORT_ROUTE_ANIMATION_MAX_DURATION") }
     var transportRouteAnimationEndPause: Double { double(forKey: "TRANSPORT_ROUTE_ANIMATION_END_PAUSE") }
     var mapRoutePlaybackFrameRate: Double { double(forKey: "MAP_ROUTE_PLAYBACK_FRAME_RATE") }
+    var routeVideoExportWidth: Int { int(forKey: "ROUTE_VIDEO_EXPORT_WIDTH") }
+    var routeVideoExportHeight: Int { int(forKey: "ROUTE_VIDEO_EXPORT_HEIGHT") }
+    var routeVideoExportFrameRate: Int { int(forKey: "ROUTE_VIDEO_EXPORT_FRAME_RATE") }
+    var routeVideoExportBitRate: Int { int(forKey: "ROUTE_VIDEO_EXPORT_BIT_RATE") }
+    var routeVideoExportFollowRouteScale: Double { double(forKey: "ROUTE_VIDEO_EXPORT_FOLLOW_ROUTE_SCALE") }
+    var routeVideoExportFollowStopScale: Double { double(forKey: "ROUTE_VIDEO_EXPORT_FOLLOW_STOP_SCALE") }
+    var routeVideoExportCinematicRouteScale: Double { double(forKey: "ROUTE_VIDEO_EXPORT_CINEMATIC_ROUTE_SCALE") }
+    var routeVideoExportCinematicStopScale: Double { double(forKey: "ROUTE_VIDEO_EXPORT_CINEMATIC_STOP_SCALE") }
+    var routeVideoExportRegionPaddingRatio: Double { double(forKey: "ROUTE_VIDEO_EXPORT_REGION_PADDING_RATIO") }
+    var routeVideoExportOverviewPaddingRatio: Double { double(forKey: "ROUTE_VIDEO_EXPORT_OVERVIEW_PADDING_RATIO") }
+    var routeVideoExportMapSnapshotScale: Double { double(forKey: "ROUTE_VIDEO_EXPORT_MAP_SNAPSHOT_SCALE") }
+    var routeVideoExportMarkerScale: Double { double(forKey: "ROUTE_VIDEO_EXPORT_MARKER_SCALE") }
+    var routeVideoExportRouteLineScale: Double { double(forKey: "ROUTE_VIDEO_EXPORT_ROUTE_LINE_SCALE") }
+    var routeVideoExportCinematicTransitionDuration: Double { double(forKey: "ROUTE_VIDEO_EXPORT_CINEMATIC_TRANSITION_DURATION") }
+    var routeVideoExportCinematicPaddingRatio: Double { double(forKey: "ROUTE_VIDEO_EXPORT_CINEMATIC_PADDING_RATIO") }
     var dayRoutePlaybackTransportCameraSpanRatio: Double { double(forKey: "DAY_ROUTE_PLAYBACK_TRANSPORT_CAMERA_SPAN_RATIO") }
     var dayRoutePlaybackStopCameraSpanRatio: Double { double(forKey: "DAY_ROUTE_PLAYBACK_STOP_CAMERA_SPAN_RATIO") }
 

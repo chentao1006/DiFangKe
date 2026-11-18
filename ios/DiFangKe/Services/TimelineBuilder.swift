@@ -2015,11 +2015,18 @@ class PersistentTimelineBuilder {
             // 让整段行程用完整时长重新聚类、重新判断交通方式；如果中途真的
             // 停留过，processPoints 自己会重新切出停留。手动记录、被忽略的
             // 记录、以及后面确实跟着停留或其他交通的记录不受影响。
+            //
+            // 但重新聚类不一定能复现原记录：原记录可能由 fillGapsBetweenItems
+            // 借助前后足迹补出端点，而末尾缺口里没有后继足迹、首段离开点也可能
+            // 被 dormant-gap 修剪，导致重处理产出为空。先删后建会让已显示的交通
+            // 在冷启动同步后凭空消失，只有手动重新生成才回来。因此这里保留原记录，
+            // 只把它的区间并回缺口：重处理得到的同一行程由
+            // insertAutomaticallyDetectedTransport 的同行程合并原地更新（观测更完整
+            // 时替换路线与交通方式并延伸终点），没有产出时原记录保持不变。
             if let trailingTransport = allTps.first(where: { $0.endTime == currentTime }),
                trailingTransport.manualTypeRaw == nil {
                 trailingGapStart = trailingTransport.startTime
                 allTps.removeAll { $0 === trailingTransport }
-                context.delete(trailingTransport)
             }
             gaps.append(TimeRange(start: trailingGapStart, end: upperLimit))
         }

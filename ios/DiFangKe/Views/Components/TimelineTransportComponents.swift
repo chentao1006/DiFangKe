@@ -402,11 +402,13 @@ struct DayRoutePlaybackInput: @unchecked Sendable {
     let kind: Kind
     let startTime: Date
     let contextLabel: String?
+    let contextDetail: String?
 
-    init(kind: Kind, startTime: Date, contextLabel: String? = nil) {
+    init(kind: Kind, startTime: Date, contextLabel: String? = nil, contextDetail: String? = nil) {
         self.kind = kind
         self.startTime = startTime
         self.contextLabel = contextLabel
+        self.contextDetail = contextDetail
     }
 }
 
@@ -423,6 +425,7 @@ struct DayRoutePlaybackFrame: @unchecked Sendable {
     let completedRouteCount: Int
     let completedStopCount: Int
     let contextLabel: String?
+    let contextDetail: String?
 }
 
 struct DayRoutePlaybackStopMarker: Identifiable, @unchecked Sendable {
@@ -515,6 +518,7 @@ struct DayRoutePlayback: @unchecked Sendable {
                     frameInterval: frameInterval,
                     config: config,
                     contextLabel: input.contextLabel,
+                    contextDetail: input.contextDetail,
                     frames: &frames
                 )
                 stopCount += 1
@@ -553,6 +557,7 @@ struct DayRoutePlayback: @unchecked Sendable {
                     frameInterval: frameInterval,
                     config: config,
                     contextLabel: input.contextLabel,
+                    contextDetail: input.contextDetail,
                     frames: &frames
                 )
                 stopCount += 1
@@ -598,7 +603,8 @@ struct DayRoutePlayback: @unchecked Sendable {
                         ),
                         completedRouteCount: routeIndex,
                         completedStopCount: stopCount,
-                        contextLabel: input.contextLabel
+                        contextLabel: input.contextLabel,
+                        contextDetail: input.contextDetail
                     ))
                 }
             }
@@ -672,6 +678,7 @@ struct DayRoutePlayback: @unchecked Sendable {
         frameInterval: TimeInterval,
         config: AppConfig,
         contextLabel: String?,
+        contextDetail: String?,
         frames: inout [DayRoutePlaybackFrame]
     ) {
         let realDuration = max(endTime.timeIntervalSince(startTime), 0)
@@ -697,7 +704,8 @@ struct DayRoutePlayback: @unchecked Sendable {
                 activeRouteCoordinateIndex: 0,
                 completedRouteCount: routeCount,
                 completedStopCount: stopIndex,
-                contextLabel: contextLabel
+                contextLabel: contextLabel,
+                contextDetail: contextDetail
             ))
         }
     }
@@ -1513,6 +1521,7 @@ struct TransportModalView: View {
     @State private var routeAnimationFrameIndex = 0
     @State private var routeAnimationRevision = 0
     @State private var isRouteAnimationPaused = false
+    @State private var routeAnimationWasPlayingBeforeVideoExport = false
     @State private var isRouteAnimationScrubbing = false
     @State private var routeAnimationWasPlayingBeforeMapTouch = false
     @AppStorage("transportRouteAnimationFollowEnabled") private var followsRouteAnimation = false
@@ -1870,6 +1879,25 @@ struct TransportModalView: View {
                     progressAccessibilityLabel: "路线动画进度",
                     resumeAccessibilityLabel: "继续路线动画",
                     pauseAccessibilityLabel: "暂停路线动画"
+                )
+
+                RouteVideoExportButton(
+                    source: .transport(
+                        routeAnimation,
+                        segments: displayedRouteSegments,
+                        symbolName: displayType.sfSymbol,
+                        followsPlayback: followsRouteAnimation
+                    ),
+                    accessibilityLabel: "导出路线视频",
+                    onPresentationChanged: { isPresented in
+                        if isPresented {
+                            routeAnimationWasPlayingBeforeVideoExport = !isRouteAnimationPaused
+                            isRouteAnimationPaused = true
+                        } else if routeAnimationWasPlayingBeforeVideoExport {
+                            routeAnimationWasPlayingBeforeVideoExport = false
+                            isRouteAnimationPaused = false
+                        }
+                    }
                 )
             }
             .padding(.horizontal, 14)

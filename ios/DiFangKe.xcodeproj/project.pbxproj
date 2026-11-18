@@ -9,6 +9,7 @@
 /* Begin PBXBuildFile section */
 		06A904412C0FBE70CFD67936 /* HistoryListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 77C2C5158B30717A490546E3 /* HistoryListView.swift */; };
 		134DBA94706ABB8ACD8C6EF5 /* ExportManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1FAF51D5207C3CFEFBEB0667 /* ExportManager.swift */; };
+		E7A100000000000000000002 /* RouteVideoExporter.swift in Sources */ = {isa = PBXBuildFile; fileRef = E7A100000000000000000001 /* RouteVideoExporter.swift */; };
 		167F3466A9C607E0782581EB /* DiFangKeWatch.app in Embed Watch Content */ = {isa = PBXBuildFile; fileRef = 1B548CB11481ECB7DDBB0606 /* DiFangKeWatch.app */; };
 		19D19D677339112CC0F14ED5 /* Place.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7338D01A9D36898197763A48 /* Place.swift */; };
 		32BD3192C18CDD34C8B5EB24 /* TimelineEditView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0188A0CAACC9286C33F0543 /* TimelineEditView.swift */; };
@@ -249,6 +250,7 @@
 		C685444B2F86BDFC00C605E9 /* DailyInsight.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DailyInsight.swift; sourceTree = "<group>"; };
 		C685444D2F877C2800C605E9 /* MiniCalendarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MiniCalendarView.swift; sourceTree = "<group>"; };
 		C68EFC112F8AA05900C1F901 /* AppConfig.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppConfig.swift; sourceTree = "<group>"; };
+		E7A100000000000000000001 /* RouteVideoExporter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RouteVideoExporter.swift; sourceTree = "<group>"; };
 		C6ACF7662F95110B006D9536 /* RawPointsListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RawPointsListView.swift; sourceTree = "<group>"; };
 		C6B399C338BB4612145C364B /* WatchHomeView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = WatchHomeView.swift; sourceTree = "<group>"; };
 		C6D2DE392F90E39800466878 /* HealthManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HealthManager.swift; sourceTree = "<group>"; };
@@ -430,6 +432,7 @@
 		6C24D087F1ECA32C5EED5AC4 /* Services */ = {
 			isa = PBXGroup;
 			children = (
+				E7A100000000000000000001 /* RouteVideoExporter.swift */,
 				C10D5A110000000000000001 /* CloudSyncStoreRecovery.swift */,
 				C11D55000000000000000001 /* TransportRouteCompletion.swift */,
 				B941AA140000000000000002 /* TripScanManager.swift */,
@@ -732,6 +735,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				E7A100000000000000000002 /* RouteVideoExporter.swift in Sources */,
 				C10D5A110000000000000002 /* CloudSyncStoreRecovery.swift in Sources */,
 				B941AA140000000000000001 /* TripScanManager.swift in Sources */,
 				B941AA130000000000000001 /* TripView.swift in Sources */,

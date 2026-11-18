@@ -8352,6 +8352,7 @@ private struct TripPlaybackItemSnapshot: @unchecked Sendable {
     let transportType: TransportType
     let route: [CodableCoordinate]
     let contextLabel: String
+    let notes: String
 }
 
 private enum TripPlaybackBuilder {
@@ -8370,7 +8371,8 @@ private enum TripPlaybackBuilder {
                         colorHex: item.colorHex
                     ),
                     startTime: item.startTime,
-                    contextLabel: item.contextLabel
+                    contextLabel: item.contextLabel,
+                    contextDetail: item.notes.nilIfEmpty
                 )
             case .transport:
                 let route = item.route.filter {
@@ -8407,7 +8409,8 @@ private enum TripPlaybackBuilder {
                 return DayRoutePlaybackInput(
                     kind: .transport(transport),
                     startTime: item.startTime,
-                    contextLabel: item.contextLabel
+                    contextLabel: item.contextLabel,
+                    contextDetail: item.notes.nilIfEmpty
                 )
             }
         }
@@ -8663,6 +8666,7 @@ struct TripDetailView: View {
     @State private var tripPlaybackHighlightedSegments: [TransportLineSegment] = []
     @State private var tripPlaybackRevision = 0
     @State private var isTripPlaybackPaused = false
+    @State private var tripPlaybackWasPlayingBeforeVideoExport = false
     @State private var isTripPlaybackScrubbing = false
     @State private var isTripPlaybackCoveredByUI = false
     @State private var isTouchingTripPlaybackMap = false
@@ -9408,7 +9412,9 @@ struct TripDetailView: View {
                 colorHex: style?.colorHex,
                 transportType: item.transportTypeRaw.flatMap(TransportType.init(rawValue:)) ?? .slow,
                 route: route,
-                contextLabel: dayLabels[item.tripDayID] ?? ""
+                contextLabel: dayLabels[item.tripDayID] ?? "",
+                notes: (kind == .transport ? item.transportNotes : item.notes)
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
             )
         }
         guard snapshots.contains(where: { $0.kind == .transport && $0.route.count >= 2 }) else { return }
@@ -9817,6 +9823,29 @@ struct TripDetailView: View {
         .accessibilityLabel("关闭行程轨迹播放")
     }
 
+    private var tripPlaybackExportButton: some View {
+        RouteVideoExportButton(
+            source: .day(
+                tripPlayback,
+                followsPlayback: followsTripPlayback,
+                videoHeader: RouteVideoHeader(
+                    title: trip.title.trimmingCharacters(in: .whitespacesAndNewlines),
+                    notes: trip.notes.trimmingCharacters(in: .whitespacesAndNewlines)
+                )
+            ),
+            accessibilityLabel: "导出行程路线视频",
+            onPresentationChanged: { isPresented in
+                if isPresented {
+                    tripPlaybackWasPlayingBeforeVideoExport = !isTripPlaybackPaused
+                    isTripPlaybackPaused = true
+                } else if tripPlaybackWasPlayingBeforeVideoExport {
+                    tripPlaybackWasPlayingBeforeVideoExport = false
+                    isTripPlaybackPaused = false
+                }
+            }
+        )
+    }
+
     @ViewBuilder
     private var tripPlaybackControls: some View {
         Group {
@@ -9824,12 +9853,14 @@ struct TripDetailView: View {
                 VStack(spacing: 12) {
                     tripPlaybackFollowButton
                     tripPlaybackScrubber(axis: .vertical)
+                    tripPlaybackExportButton
                     tripPlaybackCloseButton
                 }
             } else {
                 HStack(spacing: 12) {
                     tripPlaybackFollowButton
                     tripPlaybackScrubber(axis: .horizontal)
+                    tripPlaybackExportButton
                     tripPlaybackCloseButton
                 }
             }

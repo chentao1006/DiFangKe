@@ -4133,7 +4133,7 @@ extension CLLocationCoordinate2D {
     }
 }
 
-private struct DFKFootprintMapMarker: View {
+struct DFKFootprintMapMarker: View {
     let size: CGFloat
     let constantScale: CGFloat
     let activityColor: Color

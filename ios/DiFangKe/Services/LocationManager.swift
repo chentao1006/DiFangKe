@@ -2739,7 +2739,8 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
             }
             
             let timeGap = nStart.timeIntervalSince(bEnd)
-            if timeGap > AppConfig.shared.stayMergeGapThreshold {
+            if timeGap > AppConfig.shared.stayMergeGapThreshold
+                || liveMergeWouldHideUnsyncedGap(timeGap: timeGap) {
                 i += 1
                 continue
             }
@@ -4146,12 +4147,24 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
         }
     }
 
+    /// Live merges run before syncDay has turned the interval between two stays
+    /// into a transport (a stationary sift is debounced for many minutes). A gap
+    /// that syncDay would examine may be a real round trip, so it must stay open
+    /// until gap processing has run; syncDay's own footprint merging then joins
+    /// the two stays only when no transport was found, matching a full rebuild.
+    nonisolated static func liveMergeWouldHideUnsyncedGap(timeGap: TimeInterval) -> Bool {
+        timeGap > AppConfig.shared.gapFillingThreshold
+    }
+
     private func shouldMergeExistingFootprint(_ last: Footprint, with candidate: CandidateFootprint, matchedPlace: Place?) -> Bool {
         // 实时候选足迹同样不能跨越用户手动拆分出的边界。
         // `isUserModifiedForDailySummary` 也会把自动生成的 `.confirmed`
         // 足迹视为可用于日报，不能用于这里的合并保护；手动时间线编辑
         // 才会写入 `.manual`。
         guard last.status != .manual else { return false }
+        guard !Self.liveMergeWouldHideUnsyncedGap(
+            timeGap: candidate.startTime.timeIntervalSince(last.endTime)
+        ) else { return false }
         if let placeID = matchedPlace?.placeID, last.placeID == placeID {
             let timeGap = candidate.startTime.timeIntervalSince(last.endTime)
             return timeGap < max(AppConfig.shared.liveStayMergeTimeThreshold, AppConfig.shared.samePlaceMergeGapThreshold)

@@ -116,6 +116,7 @@ private struct TimelineDaySnapshot: Sendable {
 private struct TimelineSnapshotBatch: Sendable {
     let days: [TimelineDaySnapshot]
     let places: [PlaceLite]
+    let activities: [ActivityTypeLite]
 }
 
 /// One row of a day plan. Footprints stay value snapshots; only the
@@ -134,6 +135,9 @@ private struct TimelineDayPlan: @unchecked Sendable {
     let chronologicalOrder: [Int]
     /// Unique footprint city names in chronological order.
     let cityNames: [String]
+    /// Playback-ready values, already ordered and styled off the main actor.
+    let playbackInputs: [DayRoutePlaybackInput]
+    let playbackTransports: [Transport]
 }
 
 /// A loaded day as consumed by the timeline UI. Everything here was ordered
@@ -144,6 +148,8 @@ private struct TimelineDayContent {
     /// Oldest first.
     let chronologicalItems: [TimelineItem]
     let cityNames: [String]
+    let playbackInputs: [DayRoutePlaybackInput]
+    let playbackTransports: [Transport]
 }
 
 /// Loadable dates sorted once whenever availability or hidden days change, so
@@ -340,10 +346,12 @@ struct TimelineScene<Content: View>: View {
     @State private var dayPlayback = DayRoutePlayback.empty
     @State private var dayPlaybackItems: [TimelineItem] = []
     @State private var dayPlaybackDate: Date?
+    @State private var dayPlaybackVideoTitle = ""
     @State private var dayPlaybackFrameIndex = 0
     @State private var requestedDayPlaybackFrameIndex = 0
     @State private var dayPlaybackHighlightedSegments: [TransportLineSegment] = []
     @State private var dayPlaybackRevision = 0
+    @State private var routeVideoExportPresentation: RouteVideoExportPresentation?
     @State private var isDayPlaybackPaused = false
     @State private var isDayPlaybackControlScrubbing = false
     @State private var dayPlaybackWasRunningBeforeTouch = false
@@ -370,6 +378,7 @@ struct TimelineScene<Content: View>: View {
     @State private var activeTimelineDateBeforeDayPlayback: Date?
     @State private var dayPlaybackVisibleCamera: MapCamera?
     @State private var dayPlaybackPreparationTask: Task<Void, Never>?
+    @State private var dayPlaybackRoutePreparationTask: Task<Void, Never>?
     @State private var dayPlaybackScrubFrameTask: Task<Void, Never>?
     @StateObject private var dayPlaybackScrubGate = TimelinePlaybackScrubGate()
 
@@ -577,6 +586,8 @@ struct TimelineScene<Content: View>: View {
         let replacesActivePlayback = preservingPlaybackSession && dayPlaybackDate != nil
         dayPlaybackPreparationTask?.cancel()
         dayPlaybackPreparationTask = nil
+        dayPlaybackRoutePreparationTask?.cancel()
+        dayPlaybackRoutePreparationTask = nil
         dayPlaybackScrubFrameTask?.cancel()
         dayPlaybackScrubFrameTask = nil
         isPreparingDayPlayback = false
@@ -592,11 +603,11 @@ struct TimelineScene<Content: View>: View {
             stopDayPlayback()
         }
         let normalizedDate = Calendar.current.startOfDay(for: date)
-        let items = timelinesByDate[normalizedDate]?.items.sorted { $0.startTime < $1.startTime } ?? []
-        let transports = items.compactMap { item -> Transport? in
-            guard case .transport(let transport) = item else { return nil }
-            return transport
-        }
+        let videoTitle = DFKShareCardFactory.dateText(normalizedDate)
+        guard let dayContent = timelinesByDate[normalizedDate] else { return }
+        let items = dayContent.chronologicalItems
+        let transports = dayContent.playbackTransports
+        let inputs = dayContent.playbackInputs
         guard !transports.isEmpty else {
             if replacesActivePlayback {
                 stopDayPlayback(restoresActiveDate: false)
@@ -605,33 +616,11 @@ struct TimelineScene<Content: View>: View {
             return
         }
 
-        let inputs = items.map { item -> DayRoutePlaybackInput in
-            switch item {
-            case .footprint(let footprint):
-                let activity = footprint.getActivityType(from: allActivities)
-                return DayRoutePlaybackInput(
-                    kind: .footprint(
-                        latitudeData: footprint.latitudeData,
-                        longitudeData: footprint.longitudeData,
-                        startTime: footprint.startTime,
-                        endTime: footprint.endTime,
-                        symbolName: activity?.icon ?? "mappin",
-                        colorHex: activity?.colorHex
-                    ),
-                    startTime: footprint.startTime
-                )
-            case .transport(let transport):
-                return DayRoutePlaybackInput(
-                    kind: .transport(transport),
-                    startTime: transport.startTime
-                )
-            }
-        }
-
         isPreparingDayPlayback = true
-        dayPlaybackPreparationTask = Task { @MainActor in
+        dayPlaybackRoutePreparationTask = Task {
             await TransportRouteCompletion.prepare(transports, activelyRequested: true)
-            guard !Task.isCancelled else { return }
+        }
+        dayPlaybackPreparationTask = Task { @MainActor in
             let buildTask = Task.detached(priority: .userInitiated) {
                 DayRoutePlayback.make(inputs: inputs)
             }
@@ -672,6 +661,7 @@ struct TimelineScene<Content: View>: View {
                 dayPlayback = prepared
                 dayPlaybackItems = items
                 dayPlaybackDate = normalizedDate
+                dayPlaybackVideoTitle = videoTitle
                 dayPlaybackHighlightedSegments = []
             }
             activeTimelineDate = normalizedDate
@@ -714,6 +704,8 @@ struct TimelineScene<Content: View>: View {
     ) {
         dayPlaybackPreparationTask?.cancel()
         dayPlaybackPreparationTask = nil
+        dayPlaybackRoutePreparationTask?.cancel()
+        dayPlaybackRoutePreparationTask = nil
         dayPlaybackScrubFrameTask?.cancel()
         dayPlaybackScrubFrameTask = nil
         isPreparingDayPlayback = false
@@ -731,6 +723,7 @@ struct TimelineScene<Content: View>: View {
             dayPlayback = .empty
             dayPlaybackItems = []
             dayPlaybackDate = nil
+            dayPlaybackVideoTitle = ""
             dayPlaybackHighlightedSegments = []
         }
         dayPlaybackFrameIndex = 0
@@ -1162,6 +1155,7 @@ struct TimelineScene<Content: View>: View {
             selectedFootprint: $selectedFootprint,
             selectedFootprintStartsExpanded: $selectedFootprintStartsExpanded,
             selectedTransport: $selectedTransport,
+            routeVideoExportPresentation: $routeVideoExportPresentation,
             selectedFootprintGroup: $selectedFootprintGroup,
             onFootprintGroupCancelled: restoreTimelineDetentAfterFootprintDetail,
             loadEarlierDates: loadEarlierTimeline,
@@ -1343,6 +1337,21 @@ struct TimelineScene<Content: View>: View {
         .accessibilityLabel("关闭全天轨迹播放")
     }
 
+    private var dayPlaybackExportButton: some View {
+        RouteVideoExportButton(
+            source: .day(
+                dayPlayback,
+                followsPlayback: followsDayPlayback,
+                videoHeader: RouteVideoHeader(title: dayPlaybackVideoTitle, notes: "")
+            ),
+            accessibilityLabel: "导出全天路线视频",
+            onRequest: { source in
+                handleDayPlaybackCoverChange(true)
+                routeVideoExportPresentation = RouteVideoExportPresentation(source: source)
+            }
+        )
+    }
+
     @ViewBuilder
     private var dayPlaybackControls: some View {
         Group {
@@ -1350,12 +1359,14 @@ struct TimelineScene<Content: View>: View {
                 VStack(spacing: 12) {
                     dayPlaybackFollowButton
                     dayPlaybackScrubber(axis: .vertical)
+                    dayPlaybackExportButton
                     dayPlaybackCloseButton
                 }
             } else {
                 HStack(spacing: 12) {
                     dayPlaybackFollowButton
                     dayPlaybackScrubber(axis: .horizontal)
+                    dayPlaybackExportButton
                     dayPlaybackCloseButton
                 }
             }
@@ -2124,6 +2135,15 @@ struct TimelineScene<Content: View>: View {
                 category: place.category
             )
         }
+        let activities = ((try? context.fetch(FetchDescriptor<ActivityType>())) ?? []).map { activity in
+            ActivityTypeLite(
+                id: activity.id,
+                name: activity.name,
+                icon: activity.icon,
+                colorHex: activity.colorHex,
+                sortOrder: activity.sortOrder
+            )
+        }
 
         let days: [TimelineDaySnapshot] = dates.compactMap { date in
             let startOfDay = calendar.startOfDay(for: date)
@@ -2193,7 +2213,7 @@ struct TimelineScene<Content: View>: View {
             return TimelineDaySnapshot(date: startOfDay, footprints: footprints, transports: transports)
         }
 
-        return TimelineSnapshotBatch(days: days, places: places)
+        return TimelineSnapshotBatch(days: days, places: places, activities: activities)
     }
 
     /// Fetches the requested days and converts, aligns and orders them. Runs
@@ -2202,10 +2222,20 @@ struct TimelineScene<Content: View>: View {
         let snapshot = fetchTimelineSnapshots(for: dates, in: container)
         return snapshot.days
             .sorted { $0.date < $1.date }
-            .map { timelineDayPlan(from: $0, allPlaces: snapshot.places) }
+            .map {
+                timelineDayPlan(
+                    from: $0,
+                    allPlaces: snapshot.places,
+                    allActivities: snapshot.activities
+                )
+            }
     }
 
-    nonisolated private static func timelineDayPlan(from snapshot: TimelineDaySnapshot, allPlaces: [PlaceLite]) -> TimelineDayPlan {
+    nonisolated private static func timelineDayPlan(
+        from snapshot: TimelineDaySnapshot,
+        allPlaces: [PlaceLite],
+        allActivities: [ActivityTypeLite]
+    ) -> TimelineDayPlan {
         var items: [TimelineItem] = []
         var footprintCoordinates: [[CLLocationCoordinate2D]] = []
         items.reserveCapacity(snapshot.footprints.count + snapshot.transports.count)
@@ -2288,7 +2318,52 @@ struct TimelineScene<Content: View>: View {
             cityNames.append(cityName)
         }
 
-        return TimelineDayPlan(date: snapshot.date, entries: entries, chronologicalOrder: chronologicalOrder, cityNames: cityNames)
+        var activityStyles: [String: ActivityTypeLite] = [:]
+        activityStyles.reserveCapacity(allActivities.count * 2)
+        for activity in allActivities {
+            activityStyles[activity.id.uuidString] = activity
+            activityStyles[activity.name] = activity
+        }
+        var playbackInputs: [DayRoutePlaybackInput] = []
+        var playbackTransports: [Transport] = []
+        playbackInputs.reserveCapacity(chronologicalOrder.count)
+        playbackTransports.reserveCapacity(snapshot.transports.count)
+        for index in chronologicalOrder {
+            switch entries[index] {
+            case .footprint(let footprint, let coordinates):
+                guard !coordinates.isEmpty else { continue }
+                let latitude = coordinates.reduce(0) { $0 + $1.latitude } / Double(coordinates.count)
+                let longitude = coordinates.reduce(0) { $0 + $1.longitude } / Double(coordinates.count)
+                let coordinate = CLLocationCoordinate2D(latitude: latitude, longitude: longitude)
+                guard coordinate.isRenderableMapCoordinate else { continue }
+                let activity = footprint.activityTypeValue.flatMap { activityStyles[$0] }
+                playbackInputs.append(DayRoutePlaybackInput(
+                    kind: .stop(
+                        coordinate: coordinate,
+                        startTime: footprint.startTime,
+                        endTime: footprint.endTime,
+                        symbolName: activity?.icon ?? "mappin",
+                        colorHex: activity?.colorHex
+                    ),
+                    startTime: footprint.startTime
+                ))
+            case .transport(let transport):
+                playbackInputs.append(DayRoutePlaybackInput(
+                    kind: .transport(transport),
+                    startTime: transport.startTime
+                ))
+                playbackTransports.append(transport)
+            }
+        }
+
+        return TimelineDayPlan(
+            date: snapshot.date,
+            entries: entries,
+            chronologicalOrder: chronologicalOrder,
+            cityNames: cityNames,
+            playbackInputs: playbackInputs,
+            playbackTransports: playbackTransports
+        )
     }
 
     nonisolated private static func makeTimelineFootprint(_ footprint: TimelineFootprintSnapshot, coordinates: [CLLocationCoordinate2D]) -> Footprint {
@@ -2338,7 +2413,9 @@ struct TimelineScene<Content: View>: View {
         return TimelineDayContent(
             items: items,
             chronologicalItems: plan.chronologicalOrder.map { items[$0] },
-            cityNames: plan.cityNames
+            cityNames: plan.cityNames,
+            playbackInputs: plan.playbackInputs,
+            playbackTransports: plan.playbackTransports
         )
     }
 
@@ -3236,6 +3313,7 @@ private struct TimelineView: View {
     @Binding var selectedFootprint: Footprint?
     @Binding var selectedFootprintStartsExpanded: Bool
     @Binding var selectedTransport: Transport?
+    @Binding var routeVideoExportPresentation: RouteVideoExportPresentation?
     /// Presented here rather than by the map: the map lives in the app
     /// window, beneath the records window that hosts every sheet.
     @Binding var selectedFootprintGroup: DFKMapView.AggregatedFootprint?
@@ -3268,6 +3346,7 @@ private struct TimelineView: View {
             footprintPendingSplit != nil ||
             transportPendingSplit != nil ||
             selectedTransport != nil ||
+            routeVideoExportPresentation != nil ||
             sharePayload != nil ||
             showingTimelineShareRangePicker ||
             importantPlaceDraft != nil ||
@@ -3417,6 +3496,9 @@ private struct TimelineView: View {
                             NotificationCenter.default.post(name: NSNotification.Name("FootprintDataChanged"), object: nil)
                         }
                         .environment(locationManager)
+                    }
+                    .routeVideoExportSheet(item: $routeVideoExportPresentation) {
+                        onCoveringPresentationChanged(hasCoveringPresentation)
                     }
                     .sheet(item: $sharePayload) { _ in
                         DFKShareCardSheet(payload: $sharePayload)
