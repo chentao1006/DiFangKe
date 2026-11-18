@@ -867,9 +867,7 @@ enum DayRoutePlaybackCameraFraming {
             viewport: layout.viewport,
             visibleRect: layout.visibleRect
         ).map({ MKCoordinateRegion($0) }) else { return nil }
-        let ratio = isFollowing
-            ? AppConfig.shared.dayRoutePlaybackTransportCameraSpanRatio
-            : 1
+        let ratio = transportSpanRatio(isFollowing: isFollowing)
         var region = target
         region.span = MKCoordinateSpan(
             latitudeDelta: target.span.latitudeDelta * ratio,
@@ -894,6 +892,45 @@ enum DayRoutePlaybackCameraFraming {
             longitudeDelta: target.span.longitudeDelta * ratio
         )
         return isRenderable(region) ? region : nil
+    }
+
+    /// Map-space variants of the same framing for renderers that draw the map
+    /// themselves (route video export). The rect covers the whole viewport and
+    /// keeps the framed content centered in `layout.visibleRect`.
+    nonisolated static func transportMapRect(
+        coordinates: [CLLocationCoordinate2D],
+        layout: DayRoutePlaybackCameraLayout,
+        isFollowing: Bool
+    ) -> MKMapRect? {
+        guard let target = FootprintCameraFraming.mapRect(
+            coordinates: coordinates,
+            viewport: layout.viewport,
+            visibleRect: layout.visibleRect
+        ) else { return nil }
+        return scaled(target, by: transportSpanRatio(isFollowing: isFollowing))
+    }
+
+    nonisolated static func stopMapRect(
+        coordinate: CLLocationCoordinate2D,
+        layout: DayRoutePlaybackCameraLayout
+    ) -> MKMapRect? {
+        guard let target = FootprintCameraFraming.mapRect(
+            coordinates: [coordinate],
+            viewport: layout.viewport,
+            visibleRect: layout.visibleRect
+        ) else { return nil }
+        return scaled(target, by: AppConfig.shared.dayRoutePlaybackStopCameraSpanRatio)
+    }
+
+    private nonisolated static func transportSpanRatio(isFollowing: Bool) -> Double {
+        isFollowing ? AppConfig.shared.dayRoutePlaybackTransportCameraSpanRatio : 1
+    }
+
+    private nonisolated static func scaled(_ rect: MKMapRect, by ratio: Double) -> MKMapRect? {
+        guard ratio.isFinite, ratio > 0, !rect.isNull, rect.width > 0, rect.height > 0 else { return nil }
+        let width = rect.width * ratio
+        let height = rect.height * ratio
+        return MKMapRect(x: rect.midX - width / 2, y: rect.midY - height / 2, width: width, height: height)
     }
 
     nonisolated static func isRenderable(_ region: MKCoordinateRegion) -> Bool {
