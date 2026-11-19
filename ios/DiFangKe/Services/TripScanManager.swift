@@ -1340,7 +1340,9 @@ final class TripProgressLiveActivityManager {
         let routeIdentity = route.isEmpty
             ? "none"
             : "\(route.count):\(String(format: "%.4f,%.4f", route[route.count / 2].latitude, route[route.count / 2].longitude))"
+        let preferences = BrowseMapSettings.shared.value
         let snapshotKey = [
+            preferences.cacheKey,
             String(format: "%.3f,%.3f", current.latitude, current.longitude),
             String(format: "%.3f,%.3f", destination.latitude, destination.longitude),
             routeIdentity,
@@ -1361,35 +1363,23 @@ final class TripProgressLiveActivityManager {
         options.showsBuildings = true
 
         do {
-            options.traitCollection = UITraitCollection(userInterfaceStyle: .light)
-            let lightSnapshot = try await MKMapSnapshotter(options: options).start()
-            // Route drawing, PNG encoding and the file write run off the main thread.
-            try await Task.detached(priority: .utility) {
-                let lightImage = Self.renderedTripProgressMap(
-                    lightSnapshot,
-                    routeCoordinates: route,
-                    currentCoordinate: current,
-                    destinationCoordinate: destination,
-                    drawsDirectConnection: drawsDirectConnection,
-                    interfaceStyle: .light
-                )
-                try lightImage.pngData()?.write(to: lightURL, options: .atomic)
-            }.value
-
-            options.traitCollection = UITraitCollection(userInterfaceStyle: .dark)
-            let darkSnapshot = try await MKMapSnapshotter(options: options).start()
-            // Route drawing, PNG encoding and the file write run off the main thread.
-            try await Task.detached(priority: .utility) {
-                let darkImage = Self.renderedTripProgressMap(
-                    darkSnapshot,
-                    routeCoordinates: route,
-                    currentCoordinate: current,
-                    destinationCoordinate: destination,
-                    drawsDirectConnection: drawsDirectConnection,
-                    interfaceStyle: .dark
-                )
-                try darkImage.pngData()?.write(to: darkURL, options: .atomic)
-            }.value
+            for (appearance, url) in [(UIUserInterfaceStyle.light, lightURL), (.dark, darkURL)] {
+                let traits = preferences.apply(to: options, appearance: appearance)
+                let snapshot = try await MKMapSnapshotter(options: options).start()
+                try await Task.detached(priority: .utility) {
+                    let image = Self.renderedTripProgressMap(
+                        snapshot,
+                        routeCoordinates: route,
+                        currentCoordinate: current,
+                        destinationCoordinate: destination,
+                        drawsDirectConnection: drawsDirectConnection,
+                        interfaceStyle: traits.userInterfaceStyle,
+                        preferences: preferences
+                    )
+                    guard let data = image.pngData() else { throw CocoaError(.fileWriteUnknown) }
+                    try data.write(to: url, options: .atomic)
+                }.value
+            }
             mapSnapshotKeyByTripID[tripID] = snapshotKey
         } catch {
             print("[TripProgressLiveActivity] map snapshot failed: \(error)")
@@ -1418,7 +1408,8 @@ final class TripProgressLiveActivityManager {
         currentCoordinate: CLLocationCoordinate2D,
         destinationCoordinate: CLLocationCoordinate2D,
         drawsDirectConnection: Bool,
-        interfaceStyle: UIUserInterfaceStyle
+        interfaceStyle: UIUserInterfaceStyle,
+        preferences: BrowseMapPreferences
     ) -> UIImage {
         let traits = UITraitCollection(userInterfaceStyle: interfaceStyle)
         let markerBackground = UIColor.systemBackground.resolvedColor(with: traits)
@@ -1439,20 +1430,11 @@ final class TripProgressLiveActivityManager {
             }
 
             if displayedRouteCoordinates.count > 1 {
-                let routePath = UIBezierPath()
-                for (index, coordinate) in displayedRouteCoordinates.enumerated() {
-                    let point = snapshot.point(for: coordinate)
-                    if index == 0 { routePath.move(to: point) } else { routePath.addLine(to: point) }
-                }
-                UIColor(red: 0, green: 0.73, blue: 0.78, alpha: 0.9).setStroke()
-                routePath.lineWidth = isDirectConnection ? 3 : 5
-                routePath.lineCapStyle = .round
-                routePath.lineJoinStyle = .round
-                if isDirectConnection {
-                    routePath.setLineDash([8, 8], count: 2, phase: 0)
-                }
-                routePath.stroke()
-
+                preferences.drawSnapshotLine(
+                    displayedRouteCoordinates.map(snapshot.point(for:)), appearance: interfaceStyle,
+                    baseWidth: isDirectConnection ? 3 : 5, dash: isDirectConnection ? [8, 8] : [],
+                    baseAlpha: 0.9, baseColor: UIColor(red: 0, green: 0.73, blue: 0.78, alpha: 1)
+                )
             }
 
             Self.drawTripProgressMapMarker(

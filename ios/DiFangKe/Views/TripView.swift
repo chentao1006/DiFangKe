@@ -4769,7 +4769,7 @@ private struct PlannedTripDetailView: View {
     private var plannedTimelineDetentHeight: CGFloat { collapsedTimelineDetentHeight + 82 }
 
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
-    @State private var mapDivision: TripMapDivision?
+    @State private var mapDivision: DisplayFoldDivision?
 
     private var usesSidebarLayout: Bool {
         mapDivision != nil || horizontalSizeClass == .regular
@@ -4847,7 +4847,7 @@ private struct PlannedTripDetailView: View {
     }
 
     var body: some View {
-        let layout = TripMapDivision.layout(for: mapDivision)
+        let layout = DisplayFoldDivision.layout(for: mapDivision)
         return layout {
             if usesSidebarLayout {
                 plannedTripSheet
@@ -4942,7 +4942,7 @@ private struct PlannedTripDetailView: View {
             }
             .ignoresSafeArea()
         }
-        .onGeometryChange(for: TripMapDivision?.self) { TripMapDivision($0) } action: { mapDivision = $0 }
+        .onGeometryChange(for: DisplayFoldDivision?.self) { DisplayFoldDivision($0) } action: { mapDivision = $0 }
         .background {
             TripDetailEdgeDismissGesture(onDismiss: onClose)
         }
@@ -8857,7 +8857,7 @@ struct TripDetailView: View {
     }
 
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
-    @State private var mapDivision: TripMapDivision?
+    @State private var mapDivision: DisplayFoldDivision?
 
     private var usesSidebarLayout: Bool {
         mapDivision != nil || horizontalSizeClass == .regular || verticalSizeClass == .compact
@@ -8955,7 +8955,7 @@ struct TripDetailView: View {
     }
 
     var body: some View {
-        let layout = TripMapDivision.layout(for: mapDivision)
+        let layout = DisplayFoldDivision.layout(for: mapDivision)
         return layout {
             if usesSidebarLayout {
                 Group {
@@ -9078,7 +9078,7 @@ struct TripDetailView: View {
             }
             .ignoresSafeArea()
         }
-        .onGeometryChange(for: TripMapDivision?.self) { TripMapDivision($0) } action: { mapDivision = $0 }
+        .onGeometryChange(for: DisplayFoldDivision?.self) { DisplayFoldDivision($0) } action: { mapDivision = $0 }
         .background {
             TripDetailEdgeDismissGesture(onDismiss: onClose)
         }
@@ -9906,25 +9906,6 @@ struct TripDetailView: View {
                 cameraPosition = .rect(rect)
             }
         }
-    }
-}
-
-private struct TripMapDivision: Equatable {
-    let stacksVertically: Bool
-    let leadingExtent: CGFloat
-
-    init?(_ geometry: GeometryProxy) {
-        guard #available(iOS 27.1, *),
-              let fold = geometry.reservedRegions(kind: .division).first else { return nil }
-        stacksVertically = fold.frame.width > fold.frame.height
-        leadingExtent = stacksVertically ? fold.frame.midY : fold.frame.midX
-        let extent = stacksVertically ? geometry.size.height : geometry.size.width
-        guard leadingExtent > 0, leadingExtent < extent else { return nil }
-    }
-
-    static func layout(for division: Self?) -> AnyLayout {
-        if division?.stacksVertically == true { return AnyLayout(VStackLayout(spacing: 0)) }
-        return AnyLayout(HStackLayout(spacing: 0))
     }
 }
 

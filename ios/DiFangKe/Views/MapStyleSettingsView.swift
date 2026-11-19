@@ -101,6 +101,17 @@ struct BrowseMapPreferences: Equatable {
         return traits
     }
 
+    func drawSnapshotLine(_ points: [CGPoint], appearance: UIUserInterfaceStyle, baseWidth: CGFloat,
+                          dash: [CGFloat], baseAlpha: Double, baseColor: UIColor) {
+        guard let first = points.first else { return }
+        let path = UIBezierPath()
+        path.move(to: first)
+        for point in points.dropFirst() { path.addLine(to: point) }
+        UITraitCollection(userInterfaceStyle: appearance).performAsCurrent {
+            draw(path, baseWidth: baseWidth, dash: dash, baseAlpha: baseAlpha, baseColor: baseColor)
+        }
+    }
+
     func lineWidth(_ base: CGFloat) -> CGFloat {
         base * width
     }

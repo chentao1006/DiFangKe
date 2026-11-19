@@ -378,7 +378,7 @@ struct HistoryListView: View {
         .background(Color(uiColor: calendarOnly ? .systemBackground : .systemGroupedBackground))
         .toolbar {
             if !calendarOnly && viewMode == .favorites {
-                ToolbarItem(placement: .topBarLeading) {
+                ToolbarItem(placement: IPhoneDuo.isCurrent ? .cancellationAction : .topBarLeading) {
                     Button {
                         viewMode = .statistics
                     } label: {
@@ -2100,10 +2100,10 @@ struct PhotoImportResultsView: View {
                 await refreshGroupedResults()
             }
             .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
+                ToolbarItem(placement: IPhoneDuo.isCurrent ? .cancellationAction : .topBarLeading) {
                     Button { dismiss() } label: { Image(systemName: "xmark").dfkToolbarDismissIcon() }
                 }
-                ToolbarItem(placement: .topBarTrailing) {
+                ToolbarItem(placement: IPhoneDuo.isCurrent ? .confirmationAction : .topBarTrailing) {
                     Button("导入") { 
                         didCommitImport = true
                         PhotoImportDraftRecovery.clearPending()

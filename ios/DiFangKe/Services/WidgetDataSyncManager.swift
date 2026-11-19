@@ -537,13 +537,8 @@ final class WidgetDataSyncManager {
                 for segment in routeSegments {
                     let points = segment.coordinates.map(snapshot.point(for:))
                     guard points.count >= 2 else { continue }
-                    let path = UIBezierPath()
-                    path.move(to: points[0])
-                    for point in points.dropFirst() { path.addLine(to: point) }
-                    UITraitCollection(userInterfaceStyle: style).performAsCurrent {
-                        preferences.draw(path, baseWidth: segment.isDashed ? 1.4 : 3, dash: segment.isDashed ? [8, 8] : [],
-                                         baseAlpha: segment.isDashed ? 0.4 : 0.7, baseColor: routeColor)
-                    }
+                    preferences.drawSnapshotLine(points, appearance: style, baseWidth: segment.isDashed ? 1.4 : 3,
+                                                 dash: segment.isDashed ? [8, 8] : [], baseAlpha: segment.isDashed ? 0.4 : 0.7, baseColor: routeColor)
                 }
                 cg.setLineDash(phase: 0, lengths: [])
             }
@@ -613,13 +608,8 @@ final class WidgetDataSyncManager {
                 let points = segment.coordinates.map(snapshot.point(for:))
                 guard points.count >= 2 else { continue }
 
-                let path = UIBezierPath()
-                path.move(to: points[0])
-                for point in points.dropFirst() { path.addLine(to: point) }
-                UITraitCollection(userInterfaceStyle: style).performAsCurrent {
-                    preferences.draw(path, baseWidth: segment.isDashed ? 1.5 : 3, dash: segment.isDashed ? [4, 4] : [],
-                                     baseAlpha: segment.isDashed ? 0.42 : 0.68, baseColor: routeColor)
-                }
+                preferences.drawSnapshotLine(points, appearance: style, baseWidth: segment.isDashed ? 1.5 : 3,
+                                             dash: segment.isDashed ? [4, 4] : [], baseAlpha: segment.isDashed ? 0.42 : 0.68, baseColor: routeColor)
             }
             cg.setLineDash(phase: 0, lengths: [])
 
@@ -1821,13 +1811,8 @@ final class WidgetDataSyncManager {
                     let points = segment.coordinates.map { snapshot.point(for: $0) }
                     guard points.count >= 2 else { continue }
 
-                    let path = UIBezierPath()
-                    path.move(to: points[0])
-                    for point in points.dropFirst() { path.addLine(to: point) }
-                    UITraitCollection(userInterfaceStyle: theme).performAsCurrent {
-                        preferences.draw(path, baseWidth: segment.isDashed ? 1 : 2.5, dash: segment.isDashed ? [4, 4] : [],
-                                         baseAlpha: segment.isDashed ? 0.4 : 0.65, baseColor: themeColor)
-                    }
+                    preferences.drawSnapshotLine(points, appearance: theme, baseWidth: segment.isDashed ? 1 : 2.5,
+                                                 dash: segment.isDashed ? [4, 4] : [], baseAlpha: segment.isDashed ? 0.4 : 0.65, baseColor: themeColor)
                 }
                 ctx.cgContext.setLineDash(phase: 0, lengths: [])
 

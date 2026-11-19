@@ -3050,6 +3050,8 @@ struct HistoryStatisticsView: View {
     }
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
 
+    @State private var duoHeatmapWidth: CGFloat = 0
+
     private var usesWideReviewLayout: Bool { horizontalSizeClass == .regular }
 
     var body: some View {
@@ -4775,6 +4777,9 @@ struct HistoryStatisticsView: View {
                 preferredColumnCount: columnCount
             )
                 .frame(height: reviewRhythmDetailHeatmapHeight(itemCount: values.count, columnCount: columnCount))
+                .if(IPhoneDuo.isCurrent) { heatmap in
+                    heatmap.onGeometryChange(for: CGFloat.self) { $0.size.width } action: { duoHeatmapWidth = $0 }
+                }
         }
         .padding(16)
         .background(Color(uiColor: .secondarySystemBackground), in: RoundedRectangle(cornerRadius: 22, style: .continuous))
@@ -4795,7 +4800,8 @@ struct HistoryStatisticsView: View {
         // Match the same width constraint used by the rendered grid. Limiting
         // the cell side keeps short ranges compact and prevents iPad cells from
         // becoming oversized while still allowing a year to use the card well.
-        let availableWidth = max(1, min(UIScreen.main.bounds.width - 72, 700))
+        let width = IPhoneDuo.isCurrent ? duoHeatmapWidth : UIScreen.main.bounds.width - 72
+        let availableWidth = max(1, min(width, 700))
         let cellSide = min(
             18,
             max(1, (availableWidth - spacing * CGFloat(safeColumnCount - 1)) / CGFloat(safeColumnCount))

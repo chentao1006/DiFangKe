@@ -17,6 +17,30 @@ enum IPhoneDuo {
     }()
 }
 
+struct DisplayFoldDivision: Equatable {
+    let stacksVertically: Bool
+    let leadingExtent: CGFloat
+
+    let gap: ClosedRange<CGFloat>
+
+    init?(_ geometry: GeometryProxy, activeOnly: Bool = false) {
+        guard #available(iOS 27.1, *),
+              let fold = geometry.reservedRegions(kind: .division).first(where: { !activeOnly || $0.isActive }) else { return nil }
+        stacksVertically = fold.frame.width > fold.frame.height
+        leadingExtent = stacksVertically ? fold.frame.midY : fold.frame.midX
+        let extent = stacksVertically ? geometry.size.height : geometry.size.width
+        let start = stacksVertically ? fold.frame.minY : fold.frame.minX
+        let end = stacksVertically ? fold.frame.maxY : fold.frame.maxX
+        gap = max(0, min(start, extent))...max(0, min(end, extent))
+        guard leadingExtent > 0, leadingExtent < extent else { return nil }
+    }
+
+    static func layout(for division: Self?) -> AnyLayout {
+        if division?.stacksVertically == true { return AnyLayout(VStackLayout(spacing: 0)) }
+        return AnyLayout(HStackLayout(spacing: 0))
+    }
+}
+
 extension EnvironmentValues {
     var usesWideDuoLayout: Bool { IPhoneDuo.isCurrent && horizontalSizeClass == .regular }
 

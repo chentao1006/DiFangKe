@@ -675,16 +675,77 @@ struct OnboardingView: View {
     @State private var isRestoringData = false
     @State private var showLocationSettingsAlert = false
     
+    private var illustration: (symbol: String, color: Color) {
+        switch step {
+        case 0: return ("location.circle.fill", .dfkAccent)
+        case 1: return ("heart.text.square.fill", .orange)
+        case 2: return ("bell.badge.fill", .red)
+        case 3: return ("sparkles", .purple)
+        default: return ("icloud.and.arrow.down", .blue)
+        }
+    }
+
+    private var stepIcon: some View {
+        Image(systemName: illustration.symbol)
+            .font(.system(size: 100))
+            .foregroundColor(illustration.color)
+            .accessibilityHidden(true)
+    }
+
     var body: some View {
+        Group {
+            if IPhoneDuo.isCurrent {
+                GeometryReader { geometry in
+                    let division = DisplayFoldDivision(geometry, activeOnly: true)
+                    let size = geometry.size
+                    let horizontalFold = division?.stacksVertically == true
+                    let start = division?.gap.lowerBound ?? 0
+                    let end = division?.gap.upperBound ?? 0
+                    let panelWidth = horizontalFold ? size.width : max(0, size.width - end)
+                    let panelHeight = horizontalFold ? max(0, size.height - end) : size.height
+
+                    ZStack(alignment: .topLeading) {
+                        if division != nil {
+                            stepIcon
+                                .position(x: horizontalFold ? size.width / 2 : start / 2,
+                                          y: horizontalFold ? start / 2 : size.height / 2)
+                        }
+
+                        ScrollView {
+                            page(inlineIcon: division == nil)
+                                .padding(30)
+                                .frame(maxWidth: .infinity, minHeight: panelHeight)
+                        }
+                        .scrollBounceBehavior(.basedOnSize)
+                        .frame(width: panelWidth, height: panelHeight)
+                        .position(x: horizontalFold ? size.width / 2 : end + panelWidth / 2,
+                                  y: horizontalFold ? end + panelHeight / 2 : size.height / 2)
+                    }
+                }
+            } else {
+                page(inlineIcon: true).padding(30)
+            }
+        }
+        .alert("定位权限已关闭", isPresented: $showLocationSettingsAlert) {
+            Button("前往系统设置") {
+                guard let url = URL(string: UIApplication.openSettingsURLString) else { return }
+                UIApplication.shared.open(url)
+            }
+            Button("稍后", role: .cancel) {}
+        } message: {
+            Text("地方客无法记录足迹、停留与行程。请在系统设置中允许定位。")
+        }
+        .background(Color.dfkBackground)
+    }
+
+    private func page(inlineIcon: Bool) -> some View {
         VStack {
             Spacer()
-            
             if step == 0 {
                 onboardingStep(
                     title: "记录走过的足迹",
                     description: "为了能在后台自动为您记录走过的足迹，地方客需要位置权限。请先在系统弹窗中选择「使用 App 时允许」；完成初始设置后，地方客会再询问您是否允许「始终」定位，以便离开 App 后仍能持续记录。",
-                    image: "location.circle.fill",
-                    color: Color.dfkAccent,
+                    inlineIcon: inlineIcon,
                     buttonText: "继续"
                 ) {
                     if locationManager.authStatus == .denied
@@ -720,8 +781,7 @@ struct OnboardingView: View {
                 onboardingStep(
                     title: "连接 Apple 健康",
                     description: "地方客通过 HealthKit 读取「健康」App 中的步数、步行距离和已爬楼层，并结合运动状态（步行、骑行等）更准确地判断您何时停留或离开，同时在交通详情中显示步数。地方客不会向「健康」写入任何数据。",
-                    image: "heart.text.square.fill",
-                    color: .orange,
+                    inlineIcon: inlineIcon,
                     buttonText: "连接 Apple 健康"
                 ) {
                     HealthManager.shared.requestAuthorization { _ in
@@ -735,8 +795,7 @@ struct OnboardingView: View {
                 onboardingStep(
                     title: "及时回顾每一天",
                     description: "开启通知，我们会在每天结束时为您推送今天的足迹汇总，绝不发送无用垃圾信息。",
-                    image: "bell.badge.fill",
-                    color: .red,
+                    inlineIcon: inlineIcon,
                     buttonText: "开启通知"
                 ) {
                     NotificationManager.shared.requestAuthorization { _ in
@@ -758,8 +817,7 @@ struct OnboardingView: View {
                 onboardingStep(
                     title: "AI 智能分析",
                     description: "开启 AI 助手为您自动总结地点特色，让足迹更有个性和温度。此功能可随时在设置中关闭。",
-                    image: "sparkles",
-                    color: .purple,
+                    inlineIcon: inlineIcon,
                     buttonText: "开启 AI 智能分析"
                 ) {
                     UserDefaults.standard.set(true, forKey: "isAiAssistantEnabled")
@@ -800,8 +858,7 @@ struct OnboardingView: View {
                     onboardingStep(
                         title: "发现云端同步记录",
                         description: "在 iCloud 中发现了您之前的记录。是否要开启 iCloud 同步并恢复数据？",
-                        image: "icloud.and.arrow.down",
-                        color: .blue,
+                        inlineIcon: inlineIcon,
                         buttonText: "开启同步并恢复数据"
                     ) {
                         UserDefaults.standard.set(true, forKey: "isICloudSyncEnabled")
@@ -844,17 +901,6 @@ struct OnboardingView: View {
             
             Spacer()
         }
-        .alert("定位权限已关闭", isPresented: $showLocationSettingsAlert) {
-            Button("前往系统设置") {
-                guard let url = URL(string: UIApplication.openSettingsURLString) else { return }
-                UIApplication.shared.open(url)
-            }
-            Button("稍后", role: .cancel) {}
-        } message: {
-            Text("地方客无法记录足迹、停留与行程。请在系统设置中允许定位。")
-        }
-        .padding(30)
-        .background(Color.dfkBackground)
     }
 
     private func scheduleLocationSettingsAlertIfNeeded() {
@@ -897,11 +943,9 @@ struct OnboardingView: View {
         }
     }
     
-    func onboardingStep(title: String, description: String, image: String, color: Color, buttonText: String, action: @escaping () -> Void) -> some View {
+    func onboardingStep(title: String, description: String, inlineIcon: Bool, buttonText: String, action: @escaping () -> Void) -> some View {
         VStack(spacing: 30) {
-            Image(systemName: image)
-                .font(.system(size: 100))
-                .foregroundColor(color)
+            if inlineIcon { stepIcon }
             
             VStack(spacing: 12) {
                 Text(title)
@@ -919,7 +963,7 @@ struct OnboardingView: View {
                     .frame(maxWidth: UIDevice.current.userInterfaceIdiom == .pad || usesWideDuoLayout ? 350 : .infinity)
             }
             .dfkPrimaryActionButtonStyle()
-            .tint(color)
+            .tint(illustration.color)
         }
     }
 }

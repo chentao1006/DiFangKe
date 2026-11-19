@@ -731,47 +731,82 @@ struct ImportantPlaceGuide: View {
     var action: (() -> Void)? = nil
     
     var body: some View {
-        HStack(spacing: 14) {
-            Circle()
-                .fill(Color.orange.opacity(0.15))
-                .frame(width: 36, height: 36)
-                .overlay(Image(systemName: "mappin.and.ellipse").font(.system(size: 14, weight: .bold)).foregroundColor(.orange))
-            
-            VStack(alignment: .leading, spacing: 2) {
-                Text("添加重要地点").font(.system(size: 14, weight: .bold))
-                Text("更智能地归纳停留轨迹").font(.system(size: 12)).foregroundColor(.secondary)
-            }
-            
-            Spacer()
-            
-            HStack(spacing: 12) {
-                Button("立即添加") {
-                    if let action {
-                        action()
-                    } else {
-                        NotificationCenter.default.post(name: NSNotification.Name("NavigateToImportantPlaces"), object: nil)
+        Group {
+            if IPhoneDuo.isCurrent {
+                ViewThatFits(in: .horizontal) {
+                    horizontalCard
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack {
+                            title
+                            Spacer(minLength: 4)
+                            dismissButton
+                        }
+                        subtitle.fixedSize(horizontal: false, vertical: true)
+                        addButton.fixedSize()
                     }
                 }
-                .font(.system(size: 13, weight: .bold))
-                .foregroundColor(.orange)
-                
-                Button {
-                    withAnimation(.spring()) { isGuideDismissed = true }
-                } label: {
-                    Image(systemName: "xmark")
-                        .font(.system(size: 12, weight: .bold))
-                        .foregroundColor(.secondary.opacity(0.7))
-                        .padding(8)
-                        .background(Color.secondary.opacity(0.1))
-                        .clipShape(Circle())
-                }
-                .buttonStyle(.plain)
+            } else {
+                horizontalCard
             }
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
         .background(RoundedRectangle(cornerRadius: 16).fill(Color.orange.opacity(0.06)))
         .padding(.horizontal, 16)
+    }
+
+    private var horizontalCard: some View {
+        HStack(spacing: 14) {
+            Circle()
+                .fill(Color.orange.opacity(0.15))
+                .frame(width: 36, height: 36)
+                .overlay(Image(systemName: "mappin.and.ellipse").font(.system(size: 14, weight: .bold)).foregroundColor(.orange))
+
+            VStack(alignment: .leading, spacing: 2) {
+                title
+                subtitle
+            }
+            Spacer()
+            HStack(spacing: 12) {
+                addButton
+                dismissButton
+            }
+        }
+    }
+
+    private var title: some View {
+        Text("添加重要地点").font(.system(size: 14, weight: .bold))
+    }
+
+    private var subtitle: some View {
+        Text("更智能地归纳停留轨迹").font(.system(size: 12)).foregroundColor(.secondary)
+    }
+
+    private var addButton: some View {
+        Button("立即添加") {
+            if let action {
+                action()
+            } else {
+                NotificationCenter.default.post(name: NSNotification.Name("NavigateToImportantPlaces"), object: nil)
+            }
+        }
+        .font(.system(size: 13, weight: .bold))
+        .foregroundColor(.orange)
+    }
+
+    private var dismissButton: some View {
+        Button {
+            withAnimation(.spring()) { isGuideDismissed = true }
+        } label: {
+            Image(systemName: "xmark")
+                .font(.system(size: 12, weight: .bold))
+                .foregroundColor(.secondary.opacity(0.7))
+                .padding(8)
+                .background(Color.secondary.opacity(0.1))
+                .clipShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("关闭提示")
     }
 }
 
