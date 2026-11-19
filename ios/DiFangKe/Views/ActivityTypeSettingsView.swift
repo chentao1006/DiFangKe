@@ -312,8 +312,7 @@ struct ActivityTypeEditorView: View {
                                 .foregroundColor(selectedColor)
                         }
                         
-                        TextField("活动名称", text: $name)
-                            .font(.body)
+                        DFKIMETextField(placeholder: "活动名称", text: $name)
                     }
                 }
                 
@@ -390,9 +389,6 @@ struct ActivityTypeEditorView: View {
                 }
             }
             .scrollDismissesKeyboard(.immediately)
-            .onTapGesture {
-                UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
-            }
             .navigationTitle(activity == nil ? "新增活动" : "编辑活动")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -415,13 +411,6 @@ struct ActivityTypeEditorView: View {
                     Self.validatedIconCategories
                 }.value
                 availableIconCategories = categories
-            }
-            .onAppear {
-                if let activity = activity {
-                    name = activity.name
-                    icon = activity.icon
-                    selectedColor = activity.color
-                }
             }
         }
     }

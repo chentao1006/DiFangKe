@@ -162,6 +162,12 @@ struct SettingsView: View {
             }
 
             Section {
+                NavigationLink(destination: MapStyleSettingsView()) {
+                    Label("地图样式", systemImage: "map")
+                }
+            }
+
+            Section {
                 NavigationLink("推送通知") {
                     NotificationSettingsView()
                 }
@@ -192,7 +198,7 @@ struct SettingsView: View {
                 }
             }
 
-            Section(header: Text("关于")) {
+            Section(header: Text("关于"), footer: Text("示例路线 © [OpenStreetMap](https://www.openstreetmap.org/copyright)")) {
                 HStack {
                     Text("版本号")
                     Spacer()

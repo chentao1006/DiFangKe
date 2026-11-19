@@ -2,6 +2,30 @@ import SwiftUI
 import SwiftData
 import UIKit
 
+// Scope Duo-specific layout changes to the hardware, including its simulator.
+enum IPhoneDuo {
+    static let isCurrent: Bool = {
+#if targetEnvironment(simulator)
+        return ProcessInfo.processInfo.environment["SIMULATOR_MODEL_IDENTIFIER"] == "iPhone19,4"
+#else
+        var info = utsname()
+        guard uname(&info) == 0 else { return false }
+        return withUnsafeBytes(of: &info.machine) {
+            String(decoding: $0.prefix { $0 != 0 }, as: UTF8.self) == "iPhone19,4"
+        }
+#endif
+    }()
+}
+
+extension EnvironmentValues {
+    var usesWideDuoLayout: Bool { IPhoneDuo.isCurrent && horizontalSizeClass == .regular }
+
+    var duoVerticalBarEdge: HorizontalEdge? {
+        if #available(iOS 27.1, *), IPhoneDuo.isCurrent { return toolbarVerticalEdge }
+        return nil
+    }
+}
+
 // The native grabber area plus the two-line navigation header.
 let collapsedTimelineDetentHeight: CGFloat = UINavigationBar().sizeThatFits(.zero).height + 20
 let nativeTabBarHeight: CGFloat = UITabBar().sizeThatFits(.zero).height
@@ -32,6 +56,7 @@ struct MainTabView: View {
     @State private var hasFullHeightStackedSheet = false
     @State private var selectedTransport: Transport?
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @Environment(\.duoVerticalBarEdge) private var verticalBarEdge
     @State private var selectedDate = Calendar.current.startOfDay(for: Date())
     @State private var destination: TimelineDestination?
     @State private var usesColumnLayout = false
@@ -97,11 +122,11 @@ struct MainTabView: View {
         if usesColumns {
             NavigationSplitView(columnVisibility: .constant(.all)) {
                 records
-                    .if(isRecordPlaybackActive) { view in
+                    .if(isRecordPlaybackActive && (UIDevice.current.userInterfaceIdiom == .pad || horizontalSizeClass != .regular)) { view in
                         view.navigationSplitViewColumnWidth(min: 240, ideal: 260, max: 280)
                     }
                     .if(UIDevice.current.userInterfaceIdiom == .pad && !isRecordPlaybackActive) { view in
-                        view.navigationSplitViewColumnWidth(min: 380, ideal: 440, max: 520)
+                        view.navigationSplitViewColumnWidth(min: 300, ideal: 340, max: 380)
                     }
             } detail: {
                 map
@@ -119,7 +144,7 @@ struct MainTabView: View {
                 map
 
                 // Transport detail shows its map down to the bottom edge.
-                if selectedTransport == nil, presentationDetent == .large || hasFullHeightStackedSheet {
+                if verticalBarEdge == nil, selectedTransport == nil, presentationDetent == .large || hasFullHeightStackedSheet {
                     // The record content ends above the native tab bar. Draw
                     // only outside that content rectangle, behind the floating
                     // tab bar and its lower safe-area margin.
@@ -155,7 +180,10 @@ struct MainTabView: View {
 
     @ViewBuilder
     private func nativeTabs(records: AnyView) -> some View {
-        if #available(iOS 18.0, *) {
+        if #available(iOS 27.1, *), IPhoneDuo.isCurrent {
+            tabs(records: records)
+                .toolbarVerticalCompressionBehavior(.prefersTabBar)
+        } else if #available(iOS 18.0, *) {
             tabs(records: records).tabViewStyle(.tabBarOnly)
         } else {
             tabs(records: records)
@@ -418,7 +446,21 @@ private final class RecordSheetHostController: UIViewController {
             recordWindow?.isHidden = true
             return
         }
-        let rectInWindow = view.convert(view.bounds, to: parentWindow)
+        var rectInWindow = view.convert(view.bounds, to: parentWindow)
+        // On Duo the tab strip can occupy either side. Constrain the auxiliary
+        // sheet window to the native tab controller’s actual content width.
+        if #available(iOS 27.1, *), IPhoneDuo.isCurrent, let tabs = tabBarController {
+            let guide = tabs.contentLayoutGuide
+            if let owner = guide.owningView, !guide.layoutFrame.isEmpty {
+                let available = owner.convert(guide.layoutFrame, to: parentWindow)
+                let left = max(rectInWindow.minX, available.minX)
+                let right = min(rectInWindow.maxX, available.maxX)
+                if right > left {
+                    rectInWindow.origin.x = left
+                    rectInWindow.size.width = right - left
+                }
+            }
+        }
         let recordsFrame = parentWindow.convert(rectInWindow, to: scene.coordinateSpace)
         let frame = hasFullScreenStackedPresentation
             ? scene.coordinateSpace.bounds
@@ -481,6 +523,10 @@ private final class RecordSheetWindow: UIWindow {
 
     override var safeAreaInsets: UIEdgeInsets {
         var insets = super.safeAreaInsets
+        if IPhoneDuo.isCurrent, let scene = windowScene,
+           frame.maxY >= scene.coordinateSpace.bounds.maxY {
+            return insets
+        }
         insets.bottom = 0
         return insets
     }

@@ -9,11 +9,11 @@
 /* Begin PBXBuildFile section */
 		06A904412C0FBE70CFD67936 /* HistoryListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 77C2C5158B30717A490546E3 /* HistoryListView.swift */; };
 		134DBA94706ABB8ACD8C6EF5 /* ExportManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1FAF51D5207C3CFEFBEB0667 /* ExportManager.swift */; };
-		E7A100000000000000000002 /* RouteVideoExporter.swift in Sources */ = {isa = PBXBuildFile; fileRef = E7A100000000000000000001 /* RouteVideoExporter.swift */; };
 		167F3466A9C607E0782581EB /* DiFangKeWatch.app in Embed Watch Content */ = {isa = PBXBuildFile; fileRef = 1B548CB11481ECB7DDBB0606 /* DiFangKeWatch.app */; };
 		19D19D677339112CC0F14ED5 /* Place.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7338D01A9D36898197763A48 /* Place.swift */; };
 		32BD3192C18CDD34C8B5EB24 /* TimelineEditView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0188A0CAACC9286C33F0543 /* TimelineEditView.swift */; };
 		441650B9A8F33BB36DD1822C /* WatchHomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C6B399C338BB4612145C364B /* WatchHomeView.swift */; };
+		44D875110000000000000001 /* MapStyleSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 44D875110000000000000002 /* MapStyleSettingsView.swift */; };
 		4A0BE9B15A8560F2969D5C2D /* Secrets.plist in Resources */ = {isa = PBXBuildFile; fileRef = AA55D128BD63CB08D5888227 /* Secrets.plist */; };
 		51C5B1CA5308C8B8E9EEDFBC /* FootprintDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0DA88C94F7EAC66D28F00A84 /* FootprintDetailView.swift */; };
 		537DA85FA44FBE884BDF342B /* Foundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = C0E6E94F0AB674372B9577B9 /* Foundation.framework */; };
@@ -101,6 +101,7 @@
 		DCF7DA8245034788006DA387 /* Footprint.swift in Sources */ = {isa = PBXBuildFile; fileRef = A49FF8D1053B68159E4D2EEC /* Footprint.swift */; };
 		E59B828958C2254FFEEE593D /* LocationManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0F466FD610098E71DB17C54D /* LocationManager.swift */; };
 		E5CF6588D5181064FB5CB42D /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 76746EBFA55AE24E965803B1 /* Assets.xcassets */; };
+		E7A100000000000000000002 /* RouteVideoExporter.swift in Sources */ = {isa = PBXBuildFile; fileRef = E7A100000000000000000001 /* RouteVideoExporter.swift */; };
 		F00DBA5E0000000000000003 /* ManualFootprintBoundaryRegressionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00DBA5E0000000000000002 /* ManualFootprintBoundaryRegressionTests.swift */; };
 		F00DBA5E0000000000000010 /* CurrentActivityMapCacheTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00DBA5E0000000000000011 /* CurrentActivityMapCacheTests.swift */; };
 		F00DBA5E0000000000000020 /* CurrentStayActivityMatchingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00DBA5E0000000000000021 /* CurrentStayActivityMatchingTests.swift */; };
@@ -185,6 +186,7 @@
 		2C84EEA3EDC02DA770FA555B /* DiFangKeApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiFangKeApp.swift; sourceTree = "<group>"; };
 		35E218304D15330402004958 /* AddPlaceSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AddPlaceSheet.swift; sourceTree = "<group>"; };
 		3CC7EC170C689C92143E3FF0 /* LocationAccuracyMode.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = LocationAccuracyMode.swift; sourceTree = "<group>"; };
+		44D875110000000000000002 /* MapStyleSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MapStyleSettingsView.swift; sourceTree = "<group>"; };
 		45BAB919B70A00C9D4126C30 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		5D7A089B6F99853042F8B6A1 /* EditPlaceSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EditPlaceSheet.swift; sourceTree = "<group>"; };
 		66D82DFAC5BB6C7261047EF5 /* NotificationManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotificationManager.swift; sourceTree = "<group>"; };
@@ -250,7 +252,6 @@
 		C685444B2F86BDFC00C605E9 /* DailyInsight.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DailyInsight.swift; sourceTree = "<group>"; };
 		C685444D2F877C2800C605E9 /* MiniCalendarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MiniCalendarView.swift; sourceTree = "<group>"; };
 		C68EFC112F8AA05900C1F901 /* AppConfig.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppConfig.swift; sourceTree = "<group>"; };
-		E7A100000000000000000001 /* RouteVideoExporter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RouteVideoExporter.swift; sourceTree = "<group>"; };
 		C6ACF7662F95110B006D9536 /* RawPointsListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RawPointsListView.swift; sourceTree = "<group>"; };
 		C6B399C338BB4612145C364B /* WatchHomeView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = WatchHomeView.swift; sourceTree = "<group>"; };
 		C6D2DE392F90E39800466878 /* HealthManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HealthManager.swift; sourceTree = "<group>"; };
@@ -259,6 +260,7 @@
 		D1A7C0DE0000000000000001 /* CurrentTrackingActivityAttributes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CurrentTrackingActivityAttributes.swift; sourceTree = "<group>"; };
 		D7B718C7D98A9A3EE8FC38DC /* WatchAppDelegate.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = WatchAppDelegate.swift; sourceTree = "<group>"; };
 		E022A8CC3D9B5C3F524EC0E6 /* WatchSyncManager.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = WatchSyncManager.swift; path = Services/WatchSyncManager.swift; sourceTree = "<group>"; };
+		E7A100000000000000000001 /* RouteVideoExporter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RouteVideoExporter.swift; sourceTree = "<group>"; };
 		F00DBA5E0000000000000002 /* ManualFootprintBoundaryRegressionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ManualFootprintBoundaryRegressionTests.swift; sourceTree = "<group>"; };
 		F00DBA5E0000000000000004 /* DiFangKeTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = DiFangKeTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		F00DBA5E0000000000000011 /* CurrentActivityMapCacheTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CurrentActivityMapCacheTests.swift; sourceTree = "<group>"; };
@@ -409,6 +411,7 @@
 				C6ACF7662F95110B006D9536 /* RawPointsListView.swift */,
 				C68544472F86A80500C605E9 /* HistoryStatisticsView.swift */,
 				C68544452F854DB400C605E9 /* ActivityTypeSettingsView.swift */,
+				44D875110000000000000002 /* MapStyleSettingsView.swift */,
 				C68544412F85343F00C605E9 /* SavedPlacesView.swift */,
 				C68544322F84E84200C605E9 /* Components */,
 				C64D3DA32F81434600BB3C3F /* DFKMapView.swift */,
@@ -781,6 +784,7 @@
 				AA4B2C8D1F0E3A7B9C5D6E8F /* PhotoService.swift in Sources */,
 				C678483C2FA258DE002DF823 /* MotionType.swift in Sources */,
 				C68544462F854DB400C605E9 /* ActivityTypeSettingsView.swift in Sources */,
+				44D875110000000000000001 /* MapStyleSettingsView.swift in Sources */,
 				C64D3DA42F81434600BB3C3F /* DFKMapView.swift in Sources */,
 				C64D3DA02F8111A800BB3C3F /* RawLogsManagerView.swift in Sources */,
 				C65E583B2F8241350030A766 /* TimelineBuilder.swift in Sources */,
@@ -946,7 +950,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
-				MARKETING_VERSION = 1.7.7;
+				MARKETING_VERSION = 1.8.0;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = YES;
@@ -1077,7 +1081,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
-				MARKETING_VERSION = 1.7.7;
+				MARKETING_VERSION = 1.8.0;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
 				PRODUCT_NAME = "$(TARGET_NAME)";

@@ -2982,7 +2982,7 @@ private struct MiniMapView: View {
                         .foregroundStyle(Color(uiColor: UIColor.orange.withAlphaComponent(0.15)))
                         .stroke(Color(uiColor: UIColor.orange.withAlphaComponent(0.6)), lineWidth: 1.5)
                 }
-                .mapStyle(.standard(pointsOfInterest: .excludingAll))
+                .browseMapStyle(pointsOfInterest: .excludingAll)
                 .disabled(true)
                 .frame(minWidth: 1, minHeight: 1)
             } else {

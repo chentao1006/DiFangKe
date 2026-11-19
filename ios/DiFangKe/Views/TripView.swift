@@ -8,6 +8,7 @@ import UniformTypeIdentifiers
 
 struct TripView: View {
     var isActive = true
+    @Environment(\.usesWideDuoLayout) private var usesWideDuoLayout
     @Environment(\.modelContext) private var context
     @Query(sort: \Trip.plannedStartDay, order: .reverse) private var trips: [Trip]
     @Query private var homeCities: [HomeCity]
@@ -76,7 +77,7 @@ struct TripView: View {
     private var tripGridColumns: [GridItem] {
         Array(
             repeating: GridItem(.flexible(), spacing: 14, alignment: .top),
-            count: UIDevice.current.userInterfaceIdiom == .pad ? 3 : 1
+            count: UIDevice.current.userInterfaceIdiom == .pad ? 3 : (usesWideDuoLayout ? 2 : 1)
         )
     }
 
@@ -1471,6 +1472,7 @@ private struct TripListCardHero: View {
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.scenePhase) private var scenePhase
     @ObservedObject private var photoService = PhotoService.shared
+    @State private var preparedMap: (signature: String, content: TripCardMapContent)?
     @State private var mapImage: UIImage?
     @State private var photos: [UIImage] = []
     @State private var renderSize: CGSize = .zero
@@ -1525,8 +1527,8 @@ private struct TripListCardHero: View {
         .onReceive(NotificationCenter.default.publisher(for: TransportRouteCompletion.didChange)) { _ in
             inferredRoutesRevision = TransportRouteCompletion.revision
         }
-        .task(id: "\(model?.signature ?? "")|\(colorScheme)|\(Int(renderSize.width.rounded()))x\(Int(renderSize.height.rounded()))|photos:\(photoService.identifierResolutionRevision)|routes:\(inferredRoutesRevision)") {
-            guard let model, renderSize.width > 1, renderSize.height > 1 else { return }
+        .task(id: "\(model?.signature ?? "")|photos:\(photoService.identifierResolutionRevision)|routes:\(inferredRoutesRevision)") {
+            guard let model else { return }
             let actualDayRequests = model.actualDayRequests
             let actualSnapshots: [TripActualItemSnapshot]
             if actualDayRequests.isEmpty { actualSnapshots = [] }
@@ -1546,6 +1548,8 @@ private struct TripListCardHero: View {
                 usesPlannedStopMarkers: model.usesPlannedStopMarkers,
                 actualSnapshots: actualDayRequests.isEmpty ? nil : actualSnapshots
             ))
+            guard !Task.isCancelled else { return }
+            preparedMap = ("\(model.signature)|routes:\(inferredRoutesRevision)", mapContent)
             let loadedAssetIDs: [String]
             if actualDayRequests.isEmpty {
                 loadedAssetIDs = await TripScanManager.shared.tripCardPhotoAssetIDs(
@@ -1575,21 +1579,25 @@ private struct TripListCardHero: View {
             let sampledAssetIDs = await Task.detached(priority: .utility) {
                 Self.sampledPhotoAssetIDs(from: displayableAssetIDs, limit: 5, layoutSeed: seed)
             }.value
-            async let loadedPhotos = TripListPhotoLoader.images(for: sampledAssetIDs)
-            async let renderedMap = TripListCardMapRenderer.image(
-                signature: model.signature,
+            let loadedPhotos = await TripListPhotoLoader.images(for: sampledAssetIDs)
+            guard !Task.isCancelled else { return }
+            photos = loadedPhotos
+        }
+        .task(id: "\(preparedMap?.signature ?? "")|\(colorScheme)|\(BrowseMapSettings.shared.value.cacheKey)|\(Int(renderSize.width.rounded()))x\(Int(renderSize.height.rounded()))") {
+            guard let preparedMap, renderSize.width > 1, renderSize.height > 1 else { return }
+            let mapContent = preparedMap.content
+            let renderedMap = await TripListCardMapRenderer.image(
+                signature: preparedMap.signature,
                 stopCoordinates: mapContent.stopCoordinates,
                 stopMarkers: mapContent.stopMarkers,
                 routeSegments: mapContent.routeSegments,
                 transportMarkers: mapContent.transportMarkers,
                 renderSize: renderSize,
-                colorScheme: colorScheme
+                colorScheme: colorScheme,
+                preferences: BrowseMapSettings.shared.value
             )
-            let resolvedPhotos = await loadedPhotos
-            let resolvedMap = await renderedMap
             guard !Task.isCancelled else { return }
-            photos = resolvedPhotos
-            mapImage = resolvedMap
+            mapImage = renderedMap
         }
         .onChange(of: scenePhase) { _, phase in
             guard phase != .active, !isVisible else { return }
@@ -2045,9 +2053,11 @@ enum TripListCardMapRenderer {
         colorScheme: ColorScheme,
         focusesContentLeft: Bool = true,
         stopMarkerScale: CGFloat = 1,
-        routeLineScale: CGFloat = 1
+        routeLineScale: CGFloat = 1,
+        preferences: BrowseMapPreferences = BrowseMapPreferences()
     ) async -> UIImage? {
-        let key = "trip-record-map-style-v7|\(focusesContentLeft)|\(stopMarkerScale)|\(routeLineScale)|\(signature)|\(Int(renderSize.width.rounded()))x\(Int(renderSize.height.rounded()))|\(colorScheme)|routes:\(TransportRouteCompletion.revision)"
+        let colorScheme = preferences.scheme ?? colorScheme
+        let key = "trip-record-map-style-v7|\(preferences.cacheKey)|\(focusesContentLeft)|\(stopMarkerScale)|\(routeLineScale)|\(signature)|\(Int(renderSize.width.rounded()))x\(Int(renderSize.height.rounded()))|\(colorScheme)|routes:\(TransportRouteCompletion.revision)"
         if let cached = DFKMapSnapshotCache.shared.image(for: key) { return cached }
         // Camera framing over every coordinate runs off the main thread.
         guard let mapRect = await Task.detached(priority: .utility, operation: {
@@ -2058,6 +2068,9 @@ enum TripListCardMapRenderer {
             )
         }).value else { return nil }
         let options = MKMapSnapshotter.Options()
+        if preferences.theme != .standard || preferences.places != .page {
+            options.preferredConfiguration = preferences.configuration(defaultFilter: nil)
+        }
         options.mapRect = mapRect
         options.size = renderSize
         let screenScale = min(UIScreen.main.scale, 2)
@@ -2085,7 +2098,7 @@ enum TripListCardMapRenderer {
         }
         let renderedTransportMarkers = transportMarkers.compactMap { marker -> (CLLocationCoordinate2D, UIImage, String)? in
             let renderer = ImageRenderer(
-                content: TimelineTransportMarker(icon: marker.icon)
+                content: TimelineTransportMarker(icon: marker.icon, tint: preferences.color())
                     .scaleEffect(x: marker.travelsWest ? -1 : 1, y: 1)
                     .padding(6)
                     .environment(\.colorScheme, colorScheme)
@@ -2093,8 +2106,7 @@ enum TripListCardMapRenderer {
             renderer.scale = UIScreen.main.scale
             return renderer.uiImage.map { (marker.coordinate, $0, marker.icon) }
         }
-        let dashedRouteColor = UIColor(Color.dfkAccent.opacity(0.4))
-        let solidRouteColor = UIColor(Color.dfkAccent.opacity(0.65))
+        let routeColor = UIColor(Color.dfkAccent).resolvedColor(with: options.traitCollection)
         // Route path drawing and marker compositing run off the main thread;
         // only the SwiftUI marker rendering above needs the main actor.
         let image = await Task.detached(priority: .userInitiated) {
@@ -2105,8 +2117,9 @@ enum TripListCardMapRenderer {
                 renderedStopMarkers: renderedStopMarkers,
                 stopMarkerScale: stopMarkerScale,
                 routeLineScale: routeLineScale,
-                dashedRouteColor: dashedRouteColor,
-                solidRouteColor: solidRouteColor
+                preferences: preferences,
+                routeColor: routeColor,
+                colorScheme: colorScheme
             )
         }.value
         DFKMapSnapshotCache.shared.setImage(image, for: key)
@@ -2145,8 +2158,9 @@ enum TripListCardMapRenderer {
         renderedStopMarkers: [(CLLocationCoordinate2D, UIImage)],
         stopMarkerScale: CGFloat,
         routeLineScale: CGFloat,
-        dashedRouteColor: UIColor,
-        solidRouteColor: UIColor
+        preferences: BrowseMapPreferences,
+        routeColor: UIColor,
+        colorScheme: ColorScheme
     ) -> UIImage {
         let renderer = UIGraphicsImageRenderer(size: snapshot.image.size)
         return renderer.image { context in
@@ -2159,17 +2173,12 @@ enum TripListCardMapRenderer {
                     let point = snapshot.point(for: coordinate)
                     index == 0 ? path.move(to: point) : path.addLine(to: point)
                 }
-                // A path strokes with its own width, cap and dash, not the
-                // context's, so they are set on the path.
-                (segment.isDashed ? dashedRouteColor : solidRouteColor).setStroke()
-                path.lineWidth = (segment.isDashed ? 1.1 : 2.5) * routeLineScale
-                path.lineCapStyle = .round
-                path.lineJoinStyle = .round
-                if segment.isDashed {
-                    let dash = [4 * routeLineScale, 4 * routeLineScale]
-                    path.setLineDash(dash, count: dash.count, phase: 0)
+                UITraitCollection(userInterfaceStyle: colorScheme == .dark ? .dark : .light).performAsCurrent {
+                    preferences.draw(path, baseWidth: segment.isDashed ? 1.1 : 2.5,
+                                     dash: segment.isDashed ? [4, 4] : [],
+                                     baseAlpha: segment.isDashed ? 0.4 : 0.65,
+                                     baseColor: routeColor, scale: routeLineScale)
                 }
-                path.stroke()
             }
             // Transport icons go under the stops; touching same-type icons
             // are drawn once. Marker images carry 6pt padding on each side.
@@ -4759,8 +4768,11 @@ private struct PlannedTripDetailView: View {
 
     private var plannedTimelineDetentHeight: CGFloat { collapsedTimelineDetentHeight + 82 }
 
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @State private var mapDivision: TripMapDivision?
+
     private var usesSidebarLayout: Bool {
-        UIDevice.current.userInterfaceIdiom == .pad
+        mapDivision != nil || horizontalSizeClass == .regular
     }
 
     private var planSheetPresentation: Binding<Bool> {
@@ -4835,10 +4847,13 @@ private struct PlannedTripDetailView: View {
     }
 
     var body: some View {
-        HStack(spacing: 0) {
+        let layout = TripMapDivision.layout(for: mapDivision)
+        return layout {
             if usesSidebarLayout {
                 plannedTripSheet
-                    .frame(minWidth: 380, idealWidth: 440, maxWidth: 520)
+                    .frame(minWidth: mapDivision == nil ? 300 : nil, idealWidth: mapDivision == nil ? 340 : nil, maxWidth: mapDivision == nil ? 380 : .infinity)
+                    .frame(width: mapDivision?.stacksVertically == false ? mapDivision?.leadingExtent : nil,
+                           height: mapDivision?.stacksVertically == true ? mapDivision?.leadingExtent : nil)
                 Divider()
             }
 
@@ -4875,20 +4890,20 @@ private struct PlannedTripDetailView: View {
                     ForEach(plannedMapStops) { destination in
                         if let route = plannedRoutes[destination.id] {
                             MapPolyline(route.polyline)
-                                .stroke(
-                                    destination.id == nextDestinationID ? Color.blue : Color.dfkAccent.opacity(0.78),
-                                    lineWidth: destination.id == nextDestinationID ? 7 : 6
+                                .browseStroke(
+                                    destination.id == nextDestinationID ? Color.blue : Color.dfkAccent, opacity: destination.id == nextDestinationID ? 1 : 0.78,
+                                    style: StrokeStyle(lineWidth: destination.id == nextDestinationID ? 7 : 6)
                                 )
                         } else if let pair = plannedRoutePair(endingAt: destination) {
                             MapPolyline(coordinates: [pair.0, pair.1])
-                                .stroke(
-                                    destination.id == nextDestinationID ? Color.blue.opacity(0.8) : Color.dfkAccent.opacity(0.5),
+                                .browseStroke(
+                                    destination.id == nextDestinationID ? Color.blue : Color.dfkAccent, opacity: destination.id == nextDestinationID ? 0.8 : 0.5,
                                     style: StrokeStyle(lineWidth: 3, lineCap: .round, lineJoin: .round, dash: [5, 5])
                                 )
                         }
                     }
                 }
-                .mapStyle(.standard(elevation: .realistic))
+                .browseMapStyle(elevation: .realistic)
                 .mapControls {
                     MapUserLocationButton()
                     MapCompass()
@@ -4927,6 +4942,7 @@ private struct PlannedTripDetailView: View {
             }
             .ignoresSafeArea()
         }
+        .onGeometryChange(for: TripMapDivision?.self) { TripMapDivision($0) } action: { mapDivision = $0 }
         .background {
             TripDetailEdgeDismissGesture(onDismiss: onClose)
         }
@@ -6963,7 +6979,7 @@ private struct TripPlaceDetailSheet: View {
                             .tint(Color.dfkAccent)
                     }
                 }
-                .mapStyle(.standard(elevation: .realistic))
+                .browseMapStyle(elevation: .realistic)
                 .frame(maxWidth: .infinity)
                 .frame(height: geometry.size.height * 0.4)
 
@@ -7626,8 +7642,8 @@ private struct TripPlanRouteSheet: View {
                        let origin = effectiveOrigin,
                        let destination = selection.destination {
                         MapPolyline(coordinates: [origin, destination])
-                            .stroke(
-                                Color.dfkAccent.opacity(0.7),
+                            .browseStroke(
+                                opacity: 0.7,
                                 style: StrokeStyle(
                                     lineWidth: 4,
                                     lineCap: .round,
@@ -7642,12 +7658,10 @@ private struct TripPlanRouteSheet: View {
                                 let coordinates = instructionCoordinates(at: index, in: route)
                                 if coordinates.count > 1 {
                                     MapPolyline(coordinates: coordinates)
-                                        .stroke(
-                                            Color.dfkAccent.opacity(
-                                                selectedInstructionIndex == nil || selectedInstructionIndex == index
+                                        .browseStroke(
+                                            opacity: selectedInstructionIndex == nil || selectedInstructionIndex == index
                                                     ? 0.9
-                                                    : 0.62
-                                            ),
+                                                    : 0.62,
                                             style: StrokeStyle(
                                                 lineWidth: selectedInstructionIndex == index ? 9 : 5,
                                                 lineCap: .round,
@@ -7689,14 +7703,14 @@ private struct TripPlanRouteSheet: View {
                             }
                         } else {
                             MapPolyline(route.polyline)
-                                .stroke(
-                                    Color.dfkAccent.opacity(0.72),
+                                .browseStroke(
+                                    opacity: 0.72,
                                     style: StrokeStyle(lineWidth: 5, lineCap: .round, lineJoin: .round)
                                 )
                         }
                     }
                 }
-                .mapStyle(.standard(elevation: .realistic))
+                .browseMapStyle(elevation: .realistic)
                 .onMapCameraChange(frequency: .continuous) { context in
                     guard routeMapDragStartHeight == nil else { return }
                     displayedRouteMapCamera = context.camera
@@ -8431,6 +8445,7 @@ private struct TripDetailStopBucket: Sendable {
 
 /// Map geometry of the trip detail map, computed off the main thread.
 private struct TripDetailMapModel: Sendable {
+    var mapRoutes = BrowseRouteBatch.empty
     var routeSegments: [TripMapRouteSegment] = []
     var transportMarkers: [TripTransportMapMarkerData] = []
     var stopBuckets: [TripDetailStopBucket] = []
@@ -8610,6 +8625,7 @@ private struct TripDetailMapModel: Sendable {
                 partial + pair.0.distance(from: pair.1)
             }
         }
+        model.mapRoutes = BrowseRouteBatch(model.routeSegments, coordinates: \.coordinates, dashed: \.isDashed)
         return model
     }
 }
@@ -8663,7 +8679,7 @@ struct TripDetailView: View {
     @State private var tripPlayback = DayRoutePlayback.empty
     @State private var tripPlaybackFrameIndex = 0
     @State private var requestedTripPlaybackFrameIndex = 0
-    @State private var tripPlaybackHighlightedSegments: [TransportLineSegment] = []
+    @State private var tripPlaybackHighlightedRoutes = BrowseRouteBatch.empty
     @State private var tripPlaybackRevision = 0
     @State private var isTripPlaybackPaused = false
     @State private var tripPlaybackWasPlayingBeforeVideoExport = false
@@ -8819,7 +8835,7 @@ struct TripDetailView: View {
         guard let region = mapVisibleRegion else { return }
         let routes = mapModel.transportMarkers.map { (id: $0.id, coordinates: $0.coordinates, midpoint: $0.coordinate, icon: $0.icon) }
         let viewWidth = mapViewportSize.width
-        let diameter = TripTransportMapMarker.diameter
+        let diameter = RouteTransportMarker.diameter
         let result = await Task.detached(priority: .userInitiated) {
             var midpoints: [UUID: CLLocationCoordinate2D] = [:]
             for route in routes {
@@ -8840,8 +8856,11 @@ struct TripDetailView: View {
         mergedTransportMarkerIDs = result.merged
     }
 
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @State private var mapDivision: TripMapDivision?
+
     private var usesSidebarLayout: Bool {
-        UIDevice.current.userInterfaceIdiom == .pad || verticalSizeClass == .compact
+        mapDivision != nil || horizontalSizeClass == .regular || verticalSizeClass == .compact
     }
 
     private var sidebarWidth: CGFloat {
@@ -8885,7 +8904,7 @@ struct TripDetailView: View {
             ForEach(mapModel.transportMarkers) { marker in
                 if !mergedTransportMarkerIDs.contains(marker.id) || selectedTimelineItemID == marker.itemID {
                     Annotation("", coordinate: visibleTransportMidpoints[marker.id] ?? marker.coordinate) {
-                        TripTransportMapMarker(icon: marker.icon, travelsWest: marker.travelsWest)
+                        RouteTransportMarker(icon: marker.icon, travelsWest: marker.travelsWest)
                             .mapAnnotationLayer(MapAnnotationLayer.transport)
                     }
                 }
@@ -8925,45 +8944,6 @@ struct TripDetailView: View {
             }
         }
 
-        if tripPlayback.frames.isEmpty {
-            ForEach(mapModel.routeSegments) { segment in
-                MapPolyline(coordinates: segment.coordinates)
-                    .stroke(
-                        Color.dfkAccent.opacity(segment.isDashed ? 0.4 : 0.7),
-                        style: StrokeStyle(
-                            lineWidth: segment.isDashed ? 1.3 : 3,
-                            lineCap: .round,
-                            lineJoin: .round,
-                            dash: segment.isDashed ? [5, 5] : []
-                        )
-                    )
-            }
-        } else {
-            ForEach(tripPlayback.routeSegments) { segment in
-                MapPolyline(coordinates: segment.coordinates)
-                    .stroke(
-                        Color.dfkAccent.opacity(segment.isDashed ? 0.18 : 0.24),
-                        style: StrokeStyle(
-                            lineWidth: segment.isDashed ? 1.3 : 3,
-                            lineCap: .round,
-                            lineJoin: .round,
-                            dash: segment.isDashed ? [5, 5] : []
-                        )
-                    )
-            }
-        }
-        ForEach(tripPlaybackHighlightedSegments) { segment in
-            MapPolyline(coordinates: segment.coordinates)
-                .stroke(
-                    Color.dfkAccent,
-                    style: StrokeStyle(
-                        lineWidth: segment.isDashed ? 1.5 : 4,
-                        lineCap: .round,
-                        lineJoin: .round,
-                        dash: segment.isDashed ? [5, 5] : []
-                    )
-                )
-        }
         if let playbackOverlay = tripPlaybackOverlay,
            !tripPlaybackCentersMarkerOnScreen,
            !playbackOverlay.isMarkerHidden {
@@ -8975,7 +8955,8 @@ struct TripDetailView: View {
     }
 
     var body: some View {
-        HStack(spacing: 0) {
+        let layout = TripMapDivision.layout(for: mapDivision)
+        return layout {
             if usesSidebarLayout {
                 Group {
                     if showingSheet {
@@ -8985,7 +8966,8 @@ struct TripDetailView: View {
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
                     }
                 }
-                .frame(width: sidebarWidth)
+                .frame(width: mapDivision?.stacksVertically == true ? nil : (mapDivision?.leadingExtent ?? sidebarWidth),
+                       height: mapDivision?.stacksVertically == true ? mapDivision?.leadingExtent : nil)
                 Divider()
             }
 
@@ -8994,9 +8976,13 @@ struct TripDetailView: View {
                 Map(position: $cameraPosition) {
                     tripMapContent
         }
-        .mapStyle(.standard(
+        .background {
+            BrowseMapRoutes(routes: tripPlayback.frames.isEmpty ? mapModel.mapRoutes : tripPlayback.mapRoutes,
+                            highlighted: tripPlaybackHighlightedRoutes, playing: !tripPlayback.frames.isEmpty)
+        }
+        .browseMapStyle(
             elevation: tripPlayback.frames.isEmpty ? .realistic : .flat
-        ))
+        )
         .onMapCameraChange(frequency: .continuous) { context in
             if tripPlayback.frames.isEmpty || isTouchingTripPlaybackMap {
                 mapVisibleRegion = context.region
@@ -9092,6 +9078,7 @@ struct TripDetailView: View {
             }
             .ignoresSafeArea()
         }
+        .onGeometryChange(for: TripMapDivision?.self) { TripMapDivision($0) } action: { mapDivision = $0 }
         .background {
             TripDetailEdgeDismissGesture(onDismiss: onClose)
         }
@@ -9126,14 +9113,14 @@ struct TripDetailView: View {
                 fitCamera(to: [CLLocationCoordinate2D(latitude: latitude, longitude: longitude)])
             }
         }
-        .onChange(of: usesSidebarLayout) { _, isSidebar in
+        .onChange(of: usesSidebarLayout, initial: true) { _, isSidebar in
             if !isSidebar, !tripPlayback.frames.isEmpty {
                 detailDetent = .height(collapsedTimelineDetentHeight)
             }
         }
         .onChange(of: detailDetent) { _, _ in
             if !tripPlayback.frames.isEmpty {
-                if detailDetent != .height(collapsedTimelineDetentHeight) {
+                if !usesSidebarLayout, detailDetent != .height(collapsedTimelineDetentHeight) {
                     detailDetentBeforeTripPlayback = nil
                     stopTripPlayback()
                 }
@@ -9287,8 +9274,7 @@ struct TripDetailView: View {
             canPlay: hasPlayableTripRoute && tripPlayback.frames.isEmpty,
             isPreparingPlayback: isPreparingTripPlayback,
             onPlay: startTripPlayback,
-            collapsesAtCompactDetent: !usesSidebarLayout,
-            isPlaybackSidebarMinimized: usesSidebarLayout && !tripPlayback.frames.isEmpty
+            collapsesAtCompactDetent: !usesSidebarLayout
         )
     }
 
@@ -9375,7 +9361,7 @@ struct TripDetailView: View {
             isStop: frame.isStop,
             isMarkerHidden: frame.isStop && isTripPlaybackCameraTransitioning,
             travelsWest: frame.travelsWest,
-            highlightedSegments: tripPlaybackHighlightedSegments,
+            highlightedRoutes: tripPlaybackHighlightedRoutes,
             stopMarkers: tripPlayback.stopMarkers,
             revealedStopCount: frame.completedStopCount
         )
@@ -9452,7 +9438,7 @@ struct TripDetailView: View {
                 tripPlayback = prepared
                 tripPlaybackFrameIndex = 0
                 requestedTripPlaybackFrameIndex = 0
-                tripPlaybackHighlightedSegments = []
+                tripPlaybackHighlightedRoutes = .empty
             }
             tripPlaybackFramedRouteIndex = nil
             tripPlaybackFramedStopIndex = nil
@@ -9486,7 +9472,7 @@ struct TripDetailView: View {
             tripPlayback = .empty
             tripPlaybackFrameIndex = 0
             requestedTripPlaybackFrameIndex = 0
-            tripPlaybackHighlightedSegments = []
+            tripPlaybackHighlightedRoutes = .empty
         }
         tripPlaybackFramedRouteIndex = nil
         tripPlaybackFramedStopIndex = nil
@@ -9540,7 +9526,7 @@ struct TripDetailView: View {
         transaction.disablesAnimations = true
         withTransaction(transaction) {
             tripPlaybackFrameIndex = resolved.index
-            tripPlaybackHighlightedSegments = resolved.highlightedSegments
+            tripPlaybackHighlightedRoutes = resolved.mapRoutes
             if !framesSegmentCamera, followsTripPlayback {
                 centerTripPlaybackCamera(on: frame, animated: false)
             }
@@ -9923,6 +9909,25 @@ struct TripDetailView: View {
     }
 }
 
+private struct TripMapDivision: Equatable {
+    let stacksVertically: Bool
+    let leadingExtent: CGFloat
+
+    init?(_ geometry: GeometryProxy) {
+        guard #available(iOS 27.1, *),
+              let fold = geometry.reservedRegions(kind: .division).first else { return nil }
+        stacksVertically = fold.frame.width > fold.frame.height
+        leadingExtent = stacksVertically ? fold.frame.midY : fold.frame.midX
+        let extent = stacksVertically ? geometry.size.height : geometry.size.width
+        guard leadingExtent > 0, leadingExtent < extent else { return nil }
+    }
+
+    static func layout(for division: Self?) -> AnyLayout {
+        if division?.stacksVertically == true { return AnyLayout(VStackLayout(spacing: 0)) }
+        return AnyLayout(HStackLayout(spacing: 0))
+    }
+}
+
 private struct TripDetailEdgeDismissGesture: UIViewRepresentable {
     let onDismiss: () -> Void
 
@@ -10103,22 +10108,6 @@ private struct TripTransportMapMarkerData: Identifiable {
     var id: UUID { itemID }
 }
 
-private struct TripTransportMapMarker: View {
-    static let diameter: CGFloat = 18
-    let icon: String
-    let travelsWest: Bool
-    var body: some View {
-        ZStack {
-            Circle().fill(Color(uiColor: .systemBackground)).overlay(Circle().stroke(Color.dfkAccent, lineWidth: 1.2))
-            Image(systemName: icon)
-                .font(.system(size: 9, weight: .bold))
-                .foregroundStyle(Color.dfkAccent)
-                .scaleEffect(x: travelsWest ? -1 : 1, y: 1)
-        }
-        .frame(width: Self.diameter, height: Self.diameter)
-    }
-}
-
 private struct TripFootprintMapMarker: View {
     let icon: String
     let tint: Color
@@ -10196,7 +10185,6 @@ private struct TripDetailSheet: View {
     let isPreparingPlayback: Bool
     let onPlay: () -> Void
     let collapsesAtCompactDetent: Bool
-    let isPlaybackSidebarMinimized: Bool
     @State private var showingEditor = false
     @State private var activityStyles: [TripActivityStyle] = []
     @State private var followsVisibleTimelineContent = false
@@ -10211,8 +10199,7 @@ private struct TripDetailSheet: View {
     @State private var sharePayload: DFKShareCardPayload?
 
     private var isCollapsed: Bool {
-        (collapsesAtCompactDetent && detent == .height(collapsedTimelineDetentHeight)) ||
-            isPlaybackSidebarMinimized
+        collapsesAtCompactDetent && detent == .height(collapsedTimelineDetentHeight)
     }
 
     private var coveringPresentationKey: String {
@@ -12170,11 +12157,11 @@ extension TripEditorView {
             ForEach(index.mapLegs) { leg in
                 if let route = itineraryRoutes[leg.routeKey] {
                     MapPolyline(route.polyline)
-                        .stroke(Color.dfkAccent.opacity(0.78), lineWidth: 5)
+                        .browseStroke(opacity: 0.78, style: StrokeStyle(lineWidth: 5))
                 } else {
                     MapPolyline(coordinates: [leg.from, leg.to])
-                        .stroke(
-                            Color.dfkAccent.opacity(0.5),
+                        .browseStroke(
+                            opacity: 0.5,
                             style: StrokeStyle(lineWidth: 3, lineCap: .round, lineJoin: .round, dash: [5, 5])
                         )
                 }
@@ -12200,7 +12187,7 @@ extension TripEditorView {
                 }
             }
         }
-        .mapStyle(.standard(elevation: .realistic))
+        .browseMapStyle(elevation: .realistic)
         .mapControls {
             MapCompass()
             MapScaleView()

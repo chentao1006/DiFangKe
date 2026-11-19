@@ -667,6 +667,7 @@ struct DiFangKeApp: App {
 }
 
 struct OnboardingView: View {
+    @Environment(\.usesWideDuoLayout) private var usesWideDuoLayout
     @Binding var isFirstLaunch: Bool
     let locationManager: LocationManager
     var onRebuildContainer: () async -> Void
@@ -829,7 +830,7 @@ struct OnboardingView: View {
                         Text("不，作为新设备使用")
                             .font(.headline)
                             .foregroundColor(.primary)
-                            .frame(maxWidth: UIDevice.current.userInterfaceIdiom == .pad ? 350 : .infinity)
+                            .frame(maxWidth: UIDevice.current.userInterfaceIdiom == .pad || usesWideDuoLayout ? 350 : .infinity)
                             .padding()
                             .background(
                                 RoundedRectangle(cornerRadius: 14)
@@ -915,7 +916,7 @@ struct OnboardingView: View {
             Button(action: action) {
                 Text(buttonText)
                     .font(.headline)
-                    .frame(maxWidth: UIDevice.current.userInterfaceIdiom == .pad ? 350 : .infinity)
+                    .frame(maxWidth: UIDevice.current.userInterfaceIdiom == .pad || usesWideDuoLayout ? 350 : .infinity)
             }
             .dfkPrimaryActionButtonStyle()
             .tint(color)

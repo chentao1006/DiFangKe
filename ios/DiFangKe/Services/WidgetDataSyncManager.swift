@@ -186,6 +186,7 @@ final class WidgetDataSyncManager {
     private var todaySyncMinimumInterval: TimeInterval { AppConfig.shared.widgetTodaySyncMinInterval }
     private var historySyncMinimumInterval: TimeInterval { AppConfig.shared.widgetHistorySyncMinInterval }
     private var lastTodaySyncAt: Date?
+    private var lastTodayMapStyle: String?
     private var isTodaySyncInFlight = false
     private var hasPendingTodaySync = false
     private var isHistorySyncInFlight = false
@@ -237,6 +238,7 @@ final class WidgetDataSyncManager {
         }
 
         return await withExclusiveMapSnapshotWork {
+            let preferences = BrowseMapSettings.shared.value
             var writtenStyleCount = 0
             for style in [UIUserInterfaceStyle.light, .dark] {
                 guard !Task.isCancelled else { return false }
@@ -245,6 +247,7 @@ final class WidgetDataSyncManager {
                     coordinate: coordinate,
                     routeCoordinates: routeCoordinates,
                     style: style,
+                    preferences: preferences,
                     todayOverlays: todayOverlays
                 ) else { continue }
                 guard !Task.isCancelled else { return false }
@@ -416,6 +419,7 @@ final class WidgetDataSyncManager {
         coordinate: CLLocationCoordinate2D,
         routeCoordinates: [CodableCoordinate],
         style: UIUserInterfaceStyle,
+        preferences: BrowseMapPreferences,
         todayOverlays: CurrentActivityMapOverlays
     ) async -> Data? {
         // Route filtering, smoothing and region math run off the main actor.
@@ -431,7 +435,7 @@ final class WidgetDataSyncManager {
         options.size = CGSize(width: 400, height: 200)
         options.scale = 2.0
         options.showsBuildings = true
-        options.traitCollection = UITraitCollection(userInterfaceStyle: style)
+        let traits = preferences.apply(to: options, appearance: style)
         var snapshot: MKMapSnapshotter.Snapshot?
         for attempt in 0..<3 {
             guard !Task.isCancelled else { return nil }
@@ -464,7 +468,8 @@ final class WidgetDataSyncManager {
             Self.renderCurrentActivitySnapshot(
                 snapshot,
                 kind: kind,
-                style: style,
+                style: traits.userInterfaceStyle,
+                preferences: preferences,
                 routeSegments: prepared.routeSegments,
                 todayOverlays: todayOverlays
             ).pngData()
@@ -506,6 +511,7 @@ final class WidgetDataSyncManager {
         _ snapshot: MKMapSnapshotter.Snapshot,
         kind: CurrentTrackingActivityKind,
         style: UIUserInterfaceStyle,
+        preferences: BrowseMapPreferences,
         routeSegments: [WidgetTransportLineSegment],
         todayOverlays: CurrentActivityMapOverlays
     ) -> UIImage {
@@ -520,6 +526,7 @@ final class WidgetDataSyncManager {
                 on: snapshot,
                 in: cg,
                 style: style,
+                preferences: preferences,
                 routeColor: routeColor
             )
 
@@ -530,13 +537,13 @@ final class WidgetDataSyncManager {
                 for segment in routeSegments {
                     let points = segment.coordinates.map(snapshot.point(for:))
                     guard points.count >= 2 else { continue }
-                    cg.beginPath()
-                    cg.move(to: points[0])
-                    points.dropFirst().forEach { cg.addLine(to: $0) }
-                    cg.setStrokeColor(routeColor.withAlphaComponent(segment.isDashed ? 0.4 : 0.7).cgColor)
-                    cg.setLineWidth(segment.isDashed ? 1.4 : 3)
-                    cg.setLineDash(phase: 0, lengths: segment.isDashed ? [8, 8] : [])
-                    cg.strokePath()
+                    let path = UIBezierPath()
+                    path.move(to: points[0])
+                    for point in points.dropFirst() { path.addLine(to: point) }
+                    UITraitCollection(userInterfaceStyle: style).performAsCurrent {
+                        preferences.draw(path, baseWidth: segment.isDashed ? 1.4 : 3, dash: segment.isDashed ? [8, 8] : [],
+                                         baseAlpha: segment.isDashed ? 0.4 : 0.7, baseColor: routeColor)
+                    }
                 }
                 cg.setLineDash(phase: 0, lengths: [])
             }
@@ -594,6 +601,7 @@ final class WidgetDataSyncManager {
         on snapshot: MKMapSnapshotter.Snapshot,
         in cg: CGContext,
         style: UIUserInterfaceStyle,
+        preferences: BrowseMapPreferences,
         routeColor: UIColor
     ) {
         cg.setLineCap(.round)
@@ -605,13 +613,13 @@ final class WidgetDataSyncManager {
                 let points = segment.coordinates.map(snapshot.point(for:))
                 guard points.count >= 2 else { continue }
 
-                cg.beginPath()
-                cg.move(to: points[0])
-                points.dropFirst().forEach { cg.addLine(to: $0) }
-                cg.setStrokeColor(routeColor.withAlphaComponent(segment.isDashed ? 0.42 : 0.68).cgColor)
-                cg.setLineWidth(segment.isDashed ? 1.5 : 3)
-                cg.setLineDash(phase: 0, lengths: segment.isDashed ? [4, 4] : [])
-                cg.strokePath()
+                let path = UIBezierPath()
+                path.move(to: points[0])
+                for point in points.dropFirst() { path.addLine(to: point) }
+                UITraitCollection(userInterfaceStyle: style).performAsCurrent {
+                    preferences.draw(path, baseWidth: segment.isDashed ? 1.5 : 3, dash: segment.isDashed ? [4, 4] : [],
+                                     baseAlpha: segment.isDashed ? 0.42 : 0.68, baseColor: routeColor)
+                }
             }
             cg.setLineDash(phase: 0, lengths: [])
 
@@ -777,7 +785,8 @@ final class WidgetDataSyncManager {
         let defaults = sharedDefaults()
         let now = Date()
         let lastHistorySyncAt = defaults?.double(forKey: "widgetHistorySyncAt") ?? 0
-        if !force,
+        let mapStyle = BrowseMapSettings.shared.value.cacheKey
+        if !force, defaults?.string(forKey: "widgetHistoryMapStyle") == mapStyle,
            lastHistorySyncAt > 0,
            now.timeIntervalSince1970 - lastHistorySyncAt < historySyncMinimumInterval {
             return
@@ -804,6 +813,7 @@ final class WidgetDataSyncManager {
             try? await Task.sleep(nanoseconds: 80_000_000)
         }
 
+        defaults?.set(mapStyle, forKey: "widgetHistoryMapStyle")
         defaults?.set(Date().timeIntervalSince1970, forKey: "widgetHistorySyncAt")
         WidgetCenter.shared.reloadAllTimelines()
     }
@@ -827,7 +837,8 @@ final class WidgetDataSyncManager {
         }
 
         let now = Date()
-        if let lastTodaySyncAt, now.timeIntervalSince(lastTodaySyncAt) < todaySyncMinimumInterval {
+        let mapStyle = BrowseMapSettings.shared.value.cacheKey
+        if lastTodayMapStyle == mapStyle, let lastTodaySyncAt, now.timeIntervalSince(lastTodaySyncAt) < todaySyncMinimumInterval {
             return
         }
 
@@ -838,6 +849,7 @@ final class WidgetDataSyncManager {
 
         ensureContainer()
         await syncData(forOffset: 0)
+        lastTodayMapStyle = mapStyle
         lastTodaySyncAt = Date()
         WidgetCenter.shared.reloadAllTimelines()
 
@@ -1613,7 +1625,8 @@ final class WidgetDataSyncManager {
         // when this day's underlying data hasn't changed since the last sync — history
         // days rarely change, but syncRecentHistoryIfNeeded used to re-render them all
         // unconditionally on every call.
-        let signature = dayValues.signature
+        let preferences = BrowseMapSettings.shared.value
+        let signature = dayValues.signature + "|" + preferences.cacheKey
         let signatureKey = "widgetSnapshotSignature_\(Self.snapshotFileVersion)_\(offset)"
         let signatureDefaults = sharedDefaults()
         if dayValues.allFilesExist, signatureDefaults?.string(forKey: signatureKey) == signature {
@@ -1666,6 +1679,7 @@ final class WidgetDataSyncManager {
         ]
         let themes: [UIUserInterfaceStyle] = [.light, .dark]
 
+        var complete = true
         for s in sizes {
             for theme in themes {
                 let themeName = theme == .dark ? "dark" : "light"
@@ -1688,16 +1702,17 @@ final class WidgetDataSyncManager {
                 options.region = region
                 options.size = s.size
                 options.scale = 2.0
-                options.traitCollection = UITraitCollection(userInterfaceStyle: theme)
+                let traits = preferences.apply(to: options, appearance: theme)
 
                 let snapshotter = MKMapSnapshotter(options: options)
                 if let snapshot = try? await snapshotter.start() {
                     let fileURL = getFileURL(forOffset: offset, sizeName: s.name, themeName: themeName)
                     // Compositing, JPEG encoding and the file write run off main.
-                    await Self.offMain {
+                    let written = await Self.offMain { () -> Bool in
                         let image = Self.renderDaySnapshot(
                             snapshot,
-                            theme: theme,
+                            theme: traits.userInterfaceStyle,
+                            preferences: preferences,
                             decodedTransports: inputs.decodedTransports,
                             aggregatedFootprints: inputs.aggregatedFootprints,
                             activitiesByID: inputs.activitiesByID,
@@ -1705,10 +1720,12 @@ final class WidgetDataSyncManager {
                             footprintPhotoImages: footprintPhotoImages
                         )
                         // 保存图片
-                        if let data = image.jpegData(compressionQuality: 0.8), let fileURL {
-                            try? data.write(to: fileURL)
-                        }
+                        guard let data = image.jpegData(compressionQuality: 0.8), let fileURL else { return false }
+                        return (try? data.write(to: fileURL, options: .atomic)) != nil
                     }
+                    if !written { complete = false }
+                } else {
+                    complete = false
                 }
             }
         }
@@ -1724,7 +1741,8 @@ final class WidgetDataSyncManager {
         }
         defaults?.set(uniqueFootprintCount, forKey: "widgetCount_\(offset)")
         defaults?.set(Date().timeIntervalSince1970, forKey: "widgetUpdate_\(offset)")
-        defaults?.set(signature, forKey: signatureKey)
+        if complete { defaults?.set(signature, forKey: signatureKey) }
+        else { defaults?.removeObject(forKey: signatureKey) }
     }
 
     /// Fetches one day on a background context and returns plain values plus
@@ -1777,6 +1795,7 @@ final class WidgetDataSyncManager {
     nonisolated private static func renderDaySnapshot(
         _ snapshot: MKMapSnapshotter.Snapshot,
         theme: UIUserInterfaceStyle,
+        preferences: BrowseMapPreferences,
         decodedTransports: [WidgetDecodedTransport],
         aggregatedFootprints: [AggregatedFootprintSnapshot],
         activitiesByID: [String: WidgetActivityValue],
@@ -1802,15 +1821,13 @@ final class WidgetDataSyncManager {
                     let points = segment.coordinates.map { snapshot.point(for: $0) }
                     guard points.count >= 2 else { continue }
 
-                    ctx.cgContext.beginPath()
-                    ctx.cgContext.move(to: points[0])
-                    for i in 1..<points.count { ctx.cgContext.addLine(to: points[i]) }
-                    ctx.cgContext.setStrokeColor(
-                        themeColor.withAlphaComponent(segment.isDashed ? 0.4 : 0.65).cgColor
-                    )
-                    ctx.cgContext.setLineWidth(segment.isDashed ? 1.0 : 2.5)
-                    ctx.cgContext.setLineDash(phase: 0, lengths: segment.isDashed ? [4, 4] : [])
-                    ctx.cgContext.strokePath()
+                    let path = UIBezierPath()
+                    path.move(to: points[0])
+                    for point in points.dropFirst() { path.addLine(to: point) }
+                    UITraitCollection(userInterfaceStyle: theme).performAsCurrent {
+                        preferences.draw(path, baseWidth: segment.isDashed ? 1 : 2.5, dash: segment.isDashed ? [4, 4] : [],
+                                         baseAlpha: segment.isDashed ? 0.4 : 0.65, baseColor: themeColor)
+                    }
                 }
                 ctx.cgContext.setLineDash(phase: 0, lengths: [])
 

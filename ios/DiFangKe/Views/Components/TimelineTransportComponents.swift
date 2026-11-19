@@ -460,6 +460,7 @@ struct DayRoutePlayback: @unchecked Sendable {
     let frames: [DayRoutePlaybackFrame]
     let routeGeometries: [TransportRouteProgressGeometry]
     let routeSegments: [TransportLineSegment]
+    let mapRoutes: BrowseRouteBatch
     let stopMarkers: [DayRoutePlaybackStopMarker]
     let contextBreakpoints: [TimelinePlaybackSnapPoint]
     let trackSegments: [TimelinePlaybackTrackSegment]
@@ -471,6 +472,7 @@ struct DayRoutePlayback: @unchecked Sendable {
         frames: [],
         routeGeometries: [],
         routeSegments: [],
+        mapRoutes: .empty,
         stopMarkers: [],
         contextBreakpoints: [],
         trackSegments: [],
@@ -644,6 +646,7 @@ struct DayRoutePlayback: @unchecked Sendable {
             frames: frames,
             routeGeometries: routes,
             routeSegments: routeSegments,
+            mapRoutes: BrowseRouteBatch(routeSegments, coordinates: \.coordinates, dashed: \.isDashed),
             stopMarkers: stopMarkers,
             contextBreakpoints: contextBreakpoints,
             trackSegments: trackSegments,
@@ -777,7 +780,7 @@ final class TimelinePlaybackScrubGate: ObservableObject {
 struct TimelinePlaybackResolvedFrame: @unchecked Sendable {
     let index: Int
     let frame: DayRoutePlaybackFrame
-    let highlightedSegments: [TransportLineSegment]
+    let mapRoutes: BrowseRouteBatch
 }
 
 enum TimelinePlaybackFramePipeline {
@@ -786,13 +789,14 @@ enum TimelinePlaybackFramePipeline {
         index: Int
     ) async -> TimelinePlaybackResolvedFrame? {
         guard playback.frames.indices.contains(index) else { return nil }
-        return await Task.detached(priority: .userInitiated) {
+        return await Task.detached(priority: .userInitiated) { () -> TimelinePlaybackResolvedFrame? in
             guard !Task.isCancelled,
                   playback.frames.indices.contains(index) else { return nil }
+            let segments = playback.highlightedSegments(at: index)
             return TimelinePlaybackResolvedFrame(
                 index: index,
                 frame: playback.frames[index],
-                highlightedSegments: playback.highlightedSegments(at: index)
+                mapRoutes: BrowseRouteBatch(segments, coordinates: \.coordinates, dashed: \.isDashed)
             )
         }.value
     }
@@ -1128,7 +1132,7 @@ struct RouteMapNativeGestureObserver: UIViewRepresentable {
             }
         }
 
-        private static func nearestMapView(to probe: UIView) -> MKMapView? {
+        static func nearestMapView(to probe: UIView) -> MKMapView? {
             var ancestor = probe.superview
             while let container = ancestor {
                 let maps = mapViews(in: container)
@@ -1237,7 +1241,7 @@ private struct TimelineTrackingSlider: UIViewRepresentable {
             slider.maximumTrackTintColor = .clear
         } else {
             slider.minimumTrackTintColor = UIColor(trackTint)
-            slider.maximumTrackTintColor = UIColor(trackTint.opacity(0.22))
+            slider.maximumTrackTintColor = UIColor(trackTint)
         }
     }
 
@@ -1391,43 +1395,27 @@ struct TimelinePlaybackScrubber: View {
     private func segmentedTrack(size: CGSize) -> some View {
         let inset: CGFloat = 14
         let thickness: CGFloat = 4
-        let boundedProgress = min(max(progress, 0), 1)
         ZStack(alignment: .topLeading) {
             ForEach(trackSegments) { segment in
                 let start = min(max(segment.startProgress, 0), 1)
                 let end = min(max(segment.endProgress, start), 1)
-                let reachedEnd = min(max(boundedProgress, start), end)
                 let color = trackColor(for: segment)
                 if axis == .vertical {
                     let usableLength = max(size.height - inset * 2, 1)
                     let top = inset + (1 - end) * usableLength
                     let bottom = inset + (1 - start) * usableLength
-                    let reachedTop = inset + (1 - reachedEnd) * usableLength
                     Rectangle()
-                        .fill(color.opacity(0.22))
+                        .fill(color)
                         .frame(width: thickness, height: max(bottom - top, 0))
                         .position(x: size.width / 2, y: (top + bottom) / 2)
-                    if reachedEnd > start {
-                        Rectangle()
-                            .fill(color)
-                            .frame(width: thickness, height: max(bottom - reachedTop, 0))
-                            .position(x: size.width / 2, y: (reachedTop + bottom) / 2)
-                    }
                 } else {
                     let usableLength = max(size.width - inset * 2, 1)
                     let leading = inset + start * usableLength
                     let trailing = inset + end * usableLength
-                    let reachedTrailing = inset + reachedEnd * usableLength
                     Rectangle()
-                        .fill(color.opacity(0.22))
+                        .fill(color)
                         .frame(width: max(trailing - leading, 0), height: thickness)
                         .position(x: (leading + trailing) / 2, y: size.height / 2)
-                    if reachedEnd > start {
-                        Rectangle()
-                            .fill(color)
-                            .frame(width: max(reachedTrailing - leading, 0), height: thickness)
-                            .position(x: (leading + reachedTrailing) / 2, y: size.height / 2)
-                    }
                 }
             }
         }
@@ -1702,7 +1690,7 @@ struct TransportModalView: View {
     private func routeMapTouchChanged(isTouching: Bool) {
         guard followsRouteAnimation else { return }
         if isTouching, !isTouchingRouteMap {
-            routeAnimationWasPlayingBeforeMapTouch = !isRouteAnimationPaused
+            routeAnimationWasPlayingBeforeMapTouch = routeAnimationWasPlayingBeforeMapTouch || !isRouteAnimationPaused
             if routeAnimationWasPlayingBeforeMapTouch {
                 isRouteAnimationPaused = true
             }
@@ -1740,7 +1728,8 @@ struct TransportModalView: View {
     private func finishRouteMapInteraction() {
         Task { @MainActor in
             try? await Task.sleep(for: .milliseconds(80))
-            guard routeMapNeedsRecenterAfterInteraction,
+            guard routeAnimationWasPlayingBeforeMapTouch,
+                  routeMapNeedsRecenterAfterInteraction,
                   !isManipulatingRouteMap,
                   !isRouteMapRecentering else { return }
             isRouteMapRecentering = true
@@ -1759,18 +1748,20 @@ struct TransportModalView: View {
             completeRouteMapRecenter()
             return
         }
-        if let camera = routeCameraViewParameters {
-            position = .camera(MapCamera(
-                centerCoordinate: coordinate,
-                distance: camera.distance,
-                heading: camera.heading,
-                pitch: camera.pitch
-            ))
-        } else if var region = visibleRouteRegion {
-            region.center = coordinate
-            position = .region(region)
-        } else {
-            completeRouteMapRecenter()
+        withAnimation(accessibilityReduceMotion ? .linear : .easeInOut) {
+            if let camera = routeCameraViewParameters {
+                position = .camera(MapCamera(
+                    centerCoordinate: coordinate,
+                    distance: camera.distance,
+                    heading: camera.heading,
+                    pitch: camera.pitch
+                ))
+            } else if var region = visibleRouteRegion {
+                region.center = coordinate
+                position = .region(region)
+            } else {
+                completeRouteMapRecenter()
+            }
         }
     }
 
@@ -1820,23 +1811,24 @@ struct TransportModalView: View {
     }
 
     private func animatedTransportIcon(travelsWest: Bool, timeText: String) -> some View {
-        ZStack(alignment: .top) {
+        let tint = BrowseMapSettings.shared.value.color()
+        return ZStack(alignment: .top) {
             ZStack {
                 Circle()
                     .fill(Color(uiColor: .systemBackground))
                     .frame(width: 30, height: 30)
-                    .overlay(Circle().stroke(Color.dfkAccent, lineWidth: 1.5))
+                    .overlay(Circle().stroke(tint, lineWidth: 1.5))
                     .shadow(color: .black.opacity(0.18), radius: 3, y: 2)
                 Image(systemName: displayType.sfSymbol)
                     .font(.system(size: 15, weight: .bold))
-                    .foregroundStyle(Color.dfkAccent)
+                    .foregroundStyle(tint)
                     .scaleEffect(x: travelsWest ? -1 : 1, y: 1)
             }
 
             Text(timeText)
                 .font(.system(size: 9, weight: .bold, design: .rounded))
                 .lineLimit(1)
-                .foregroundStyle(Color.dfkAccent)
+                .foregroundStyle(tint)
                 .padding(.horizontal, 3)
                 .padding(.vertical, 1)
                 .background(
@@ -1845,7 +1837,7 @@ struct TransportModalView: View {
                 )
                 .overlay(
                     RoundedRectangle(cornerRadius: 3)
-                        .stroke(Color.dfkAccent, lineWidth: 0.5)
+                        .stroke(tint, lineWidth: 0.5)
                 )
                 .offset(y: 25)
         }
@@ -1875,20 +1867,6 @@ struct TransportModalView: View {
             HStack(spacing: 12) {
                 Button {
                     followsRouteAnimation.toggle()
-                    if followsRouteAnimation {
-                        centerCameraOnAnimationFrame()
-                    } else {
-                        if routeAnimationWasPlayingBeforeMapTouch {
-                            isRouteAnimationPaused = false
-                        }
-                        routeAnimationWasPlayingBeforeMapTouch = false
-                        isDraggingRouteMap = false
-                        isZoomingRouteMap = false
-                        isRotatingRouteMap = false
-                        isTouchingRouteMap = false
-                        isRouteMapRecentering = false
-                        routeMapNeedsRecenterAfterInteraction = false
-                    }
                 } label: {
                     Image(systemName: "plus.viewfinder")
                         .font(.system(size: 14, weight: .bold))
@@ -1983,8 +1961,8 @@ struct TransportModalView: View {
                             
                             ForEach(displayedRouteSegments) { segment in
                                 MapPolyline(coordinates: segment.coordinates)
-                                    .stroke(
-                                        Color.dfkAccent.opacity(segment.isDashed ? 0.18 : 0.24),
+                                    .browseStroke(
+                                        playbackOpacity: BrowseMapPreferences.untraveledOpacity(dashed: segment.isDashed),
                                         style: StrokeStyle(
                                             lineWidth: segment.isDashed ? 1.5 : 3,
                                             lineCap: .round,
@@ -1997,7 +1975,7 @@ struct TransportModalView: View {
                             if let frame = currentRouteAnimationFrame {
                                 ForEach(frame.highlightedSegments) { segment in
                                     MapPolyline(coordinates: segment.coordinates)
-                                        .stroke(
+                                        .browseStroke(
                                             Color.dfkAccent,
                                             style: StrokeStyle(
                                                 lineWidth: segment.isDashed ? 1.5 : 4,
@@ -2009,17 +1987,7 @@ struct TransportModalView: View {
                                 }
                             }
 
-                            // While the camera is following, draw the vehicle as a
-                            // screen-centered overlay below. A map annotation and
-                            // the camera are committed by MapKit on different render
-                            // passes, which otherwise makes the vehicle visibly
-                            // oscillate around the center. During a user gesture the
-                            // real annotation returns so it remains attached to the
-                            // route while the camera is freely manipulated.
-                            if let frame = currentRouteAnimationFrame,
-                               !followsRouteAnimation ||
-                               isManipulatingRouteMap ||
-                               routeMapNeedsRecenterAfterInteraction {
+                            if let frame = currentRouteAnimationFrame {
                                 Annotation("", coordinate: frame.coordinate) {
                                     animatedTransportIcon(
                                         travelsWest: frame.travelsWest,
@@ -2030,20 +1998,7 @@ struct TransportModalView: View {
                             }
                             
                             }
-                            .mapStyle(.standard(elevation: .automatic, emphasis: .muted, pointsOfInterest: .excludingAll))
-                            .overlay {
-                                if followsRouteAnimation,
-                                   !isManipulatingRouteMap,
-                                   !routeMapNeedsRecenterAfterInteraction,
-                                   let frame = currentRouteAnimationFrame {
-                                    animatedTransportIcon(
-                                        travelsWest: frame.travelsWest,
-                                        timeText: frame.timeText
-                                    )
-                                    .allowsHitTesting(false)
-                                    .accessibilityHidden(true)
-                                }
-                            }
+                            .browseMapStyle(elevation: .automatic, pointsOfInterest: .excludingAll)
                             .background {
                                 RouteMapNativeGestureObserver(
                                     onInteractionChanged: { kind, isActive in
@@ -2288,11 +2243,35 @@ struct TransportModalView: View {
                 editableRouteGaps = prepared.gaps
                 routeTapTargets = prepared.tapTargets
             }
-            .task(id: "\(routeAnimationRevision)-\(accessibilityReduceMotion)-\(isRouteAnimationPaused)-\(isRouteAnimationScrubbing)") {
+            .onChange(of: followsRouteAnimation) { _, follows in
+                if follows {
+                    withAnimation(accessibilityReduceMotion ? .linear : .easeInOut) {
+                        centerCameraOnAnimationFrame()
+                    }
+                } else {
+                    if routeAnimationWasPlayingBeforeMapTouch {
+                        isRouteAnimationPaused = false
+                    }
+                    routeAnimationWasPlayingBeforeMapTouch = false
+                    isDraggingRouteMap = false
+                    isZoomingRouteMap = false
+                    isRotatingRouteMap = false
+                    isTouchingRouteMap = false
+                    isRouteMapRecentering = false
+                    routeMapNeedsRecenterAfterInteraction = false
+                }
+            }
+            .task(id: "\(routeAnimationRevision)-\(followsRouteAnimation)-\(accessibilityReduceMotion)-\(isRouteAnimationPaused)-\(isRouteAnimationScrubbing)") {
                 guard !isRouteAnimationPaused,
                       !isRouteAnimationScrubbing,
                       routeAnimation.frames.count >= 2,
                       routeAnimation.frameInterval > 0 else { return }
+                if followsRouteAnimation && routeMapNeedsRecenterAfterInteraction {
+                    routeAnimationWasPlayingBeforeMapTouch = true
+                    isRouteAnimationPaused = true
+                    finishRouteMapInteraction()
+                    return
+                }
                 await TimelinePlaybackAdvancePipeline.run(
                     frameCount: { routeAnimation.frames.count },
                     frameInterval: { routeAnimation.frameInterval },
@@ -2686,8 +2665,8 @@ private struct TransportRouteCorrectionView: View {
                         }
                         if let coordinates = previewCoordinates {
                             MapPolyline(coordinates: coordinates)
-                                .stroke(
-                                    Color.dfkAccent.opacity(0.8),
+                                .browseStroke(
+                                    opacity: 0.8,
                                     style: StrokeStyle(lineWidth: 4, lineCap: .round, lineJoin: .round, dash: [7, 6])
                                 )
                         }
@@ -2699,7 +2678,7 @@ private struct TransportRouteCorrectionView: View {
                                 )
                         }
                     }
-                    .mapStyle(.standard(elevation: .automatic, emphasis: .muted, pointsOfInterest: .excludingAll))
+                    .browseMapStyle(elevation: .automatic, pointsOfInterest: .excludingAll)
                     .mapControls {
                         MapUserLocationButton()
                         MapCompass()
@@ -3548,7 +3527,7 @@ private struct TransportSplitMapView: UIViewRepresentable {
     func makeCoordinator() -> Coordinator { Coordinator() }
 
     func makeUIView(context: Context) -> MKMapView {
-        let mapView = MKMapView(frame: .zero)
+        let mapView = SafeMKMapView(frame: .zero)
         mapView.delegate = context.coordinator
         mapView.mapType = .standard
         mapView.pointOfInterestFilter = .excludingAll

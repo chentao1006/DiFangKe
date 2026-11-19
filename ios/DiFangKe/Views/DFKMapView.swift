@@ -432,6 +432,7 @@ private struct DFKMapContent {
     var footprints: [DFKMapFootprintInput] = []
     var placeGroups: [DFKMapFootprintGroup] = []
     var transports: [DFKMapTransportDisplay] = []
+    var mapRoutes = BrowseRouteBatch.empty
     var transportSegments: [TransportLineSegment] = []
     var annotationTransports: [DFKMapTransportDisplay] = []
     var userDefinedPlaces: [DFKMapPlaceCircle] = []
@@ -548,6 +549,7 @@ private enum DFKMapContentBuilder {
             return display(for: transport)
         }
         content.transportSegments = content.transports.flatMap(\.segments)
+        content.mapRoutes = BrowseRouteBatch(content.transportSegments, coordinates: \.coordinates, dashed: \.isDashed)
         content.annotationTransports = content.transports
 
         for (index, place) in request.places.enumerated() where place.isUserDefined {
@@ -902,6 +904,7 @@ private struct DFKMapSnapshotDrawing {
     let scale: CGFloat
     let isDark: Bool
     let themeColor: UIColor
+    let preferences: BrowseMapPreferences
     let deepRedColor: UIColor
     let placeCircles: [DFKMapPlaceCircle]
     let usesReviewTransportOverview: Bool
@@ -948,22 +951,19 @@ private struct DFKMapSnapshotDrawing {
             ctx.cgContext.setLineCap(.round)
             ctx.cgContext.setLineJoin(.round)
 
-            if usesReviewTransportOverview {
-                for segment in segments {
-                    let points = segment.coordinates.map { snapshot.point(for: $0) }
-                    guard let first = points.first, points.count >= 2 else { continue }
-                    ctx.cgContext.beginPath()
-                    ctx.cgContext.move(to: first)
-                    for point in points.dropFirst() {
-                        ctx.cgContext.addLine(to: point)
-                    }
-                    ctx.cgContext.setStrokeColor(themeColor.withAlphaComponent(segment.isDashed ? 0.4 : 0.65).cgColor)
-                    ctx.cgContext.setLineWidth(segment.isDashed ? 1 : 2.5)
-                    ctx.cgContext.setLineDash(phase: 0, lengths: segment.isDashed ? [4, 4] : [])
-                    ctx.cgContext.strokePath()
+            for segment in segments {
+                guard segment.coordinates.count >= 2 else { continue }
+                let path = UIBezierPath()
+                for (index, coordinate) in segment.coordinates.enumerated() {
+                    let point = snapshot.point(for: coordinate)
+                    if index == 0 { path.move(to: point) } else { path.addLine(to: point) }
                 }
-                ctx.cgContext.setLineDash(phase: 0, lengths: [])
-
+                preferences.draw(path, baseWidth: segment.isDashed ? 1 : 2.5,
+                                 dash: segment.isDashed ? [4, 4] : [],
+                                 baseAlpha: segment.isDashed ? 0.4 : 0.65, baseColor: themeColor)
+            }
+            let transportColor = preferences.colorHex.isEmpty ? themeColor : UIColor(preferences.color())
+            if usesReviewTransportOverview {
                 let keptIcons = MapTransportIconMerge.keptIndices(
                     points: iconPoints.map { snapshot.point(for: $0.coordinate) },
                     types: iconPoints.map(\.type.rawValue),
@@ -974,37 +974,19 @@ private struct DFKMapSnapshotDrawing {
                     let circleRect = CGRect(x: point.x - 12, y: point.y - 12, width: 24, height: 24)
                     UIColor.systemBackground.setFill()
                     UIBezierPath(ovalIn: circleRect).fill()
-                    themeColor.setStroke()
+                    transportColor.setStroke()
                     let outline = UIBezierPath(ovalIn: circleRect)
                     outline.lineWidth = 1.5
                     outline.stroke()
                     if let sourceImage = UIImage(systemName: iconPoint.type.sfSymbol) {
                         let iconImage = iconPoint.travelsWest ? sourceImage.withHorizontallyFlippedOrientation() : sourceImage
                         Self.drawImageAspectFit(
-                            iconImage.withTintColor(themeColor),
+                            iconImage.withTintColor(transportColor),
                             in: CGRect(x: point.x - 6, y: point.y - 6, width: 12, height: 12)
                         )
                     }
                 }
             } else {
-                for segment in segments {
-                    let projected = segment.coordinates.map { snapshot.point(for: $0) }
-                    guard projected.count >= 2 else { continue }
-
-                    ctx.cgContext.beginPath()
-                    ctx.cgContext.move(to: projected[0])
-                    for i in 1..<projected.count {
-                        ctx.cgContext.addLine(to: projected[i])
-                    }
-                    ctx.cgContext.setStrokeColor(
-                        themeColor.withAlphaComponent(segment.isDashed ? 0.4 : 0.65).cgColor
-                    )
-                    ctx.cgContext.setLineWidth(segment.isDashed ? 1 : 2.5)
-                    ctx.cgContext.setLineDash(phase: 0, lengths: segment.isDashed ? [4, 4] : [])
-                    ctx.cgContext.strokePath()
-                }
-                ctx.cgContext.setLineDash(phase: 0, lengths: [])
-
                 let placedTransports = annotationTransports.compactMap { display -> (display: DFKMapTransportDisplay, point: CGPoint)? in
                     guard display.transport.points.count >= 2, let midCoord = display.midpoint else { return nil }
                     return (display, snapshot.point(for: midCoord))
@@ -1019,13 +1001,13 @@ private struct DFKMapSnapshotDrawing {
                     let path = UIBezierPath(ovalIn: rect)
                     UIColor.systemBackground.setFill()
                     path.fill()
-                    themeColor.setStroke()
+                    transportColor.setStroke()
                     path.lineWidth = 1.2
                     path.stroke()
 
                     if let sourceImage = UIImage(systemName: display.transport.currentType.sfSymbol) {
                         let iconImage = display.travelsWest ? sourceImage.withHorizontallyFlippedOrientation() : sourceImage
-                        Self.drawImageAspectFit(iconImage.withTintColor(themeColor), in: CGRect(x: midPoint.x - 4, y: midPoint.y - 4, width: 8, height: 8))
+                        Self.drawImageAspectFit(iconImage.withTintColor(transportColor), in: CGRect(x: midPoint.x - 4, y: midPoint.y - 4, width: 8, height: 8))
                     }
                 }
             }
@@ -1413,9 +1395,37 @@ struct DFKMapPlaybackOverlay: @unchecked Sendable {
     let isStop: Bool
     let isMarkerHidden: Bool
     let travelsWest: Bool
-    let highlightedSegments: [TransportLineSegment]
+    let highlightedRoutes: BrowseRouteBatch
     let stopMarkers: [DayRoutePlaybackStopMarker]
     let revealedStopCount: Int
+}
+
+struct RouteTransportMarker: View {
+    static let diameter: CGFloat = 18
+    let icon: String
+    let travelsWest: Bool
+    var size: CGFloat = Self.diameter
+    var iconSize: CGFloat = 9
+    var tint: Color = BrowseMapSettings.shared.value.color()
+
+    @MainActor static func image(icon: String, travelsWest: Bool, tint: Color, scheme: ColorScheme) -> UIImage {
+        let renderer = ImageRenderer(content: RouteTransportMarker(icon: icon, travelsWest: travelsWest, tint: tint)
+            .padding(1)
+            .environment(\.colorScheme, scheme))
+        renderer.scale = UIScreen.main.scale
+        return renderer.uiImage ?? UIImage()
+    }
+
+    var body: some View {
+        ZStack {
+            Circle().fill(Color(uiColor: .systemBackground)).overlay(Circle().stroke(tint, lineWidth: 1.2))
+            Image(systemName: icon)
+                .font(.system(size: iconSize, weight: .bold))
+                .foregroundStyle(tint)
+                .scaleEffect(x: travelsWest ? -1 : 1, y: 1)
+        }
+        .frame(width: size, height: size)
+    }
 }
 
 /// The single marker implementation used by every route playback surface.
@@ -1443,7 +1453,7 @@ struct DFKMapPlaybackMarker: View {
                 )
                 .scaleEffect(1.5, anchor: .bottom)
             } else {
-                let markerColor = playbackOverlay.markerColor
+                let markerColor = BrowseMapSettings.shared.value.color(playbackOverlay.markerColor)
                 ZStack(alignment: .top) {
                     Circle()
                         .fill(Color(uiColor: .systemBackground))
@@ -1657,7 +1667,7 @@ struct DFKMapView: View {
     @State private var transportMapWidth: CGFloat = 0
     // Review transport data, computed in background tasks and only read here.
     @State private var reviewTransportGeometry = DFKReviewTransportGeometry()
-    @State private var reviewVisibleSegments: [DFKReviewTransportLine] = []
+    @State private var reviewRoutes = BrowseRouteBatch.empty
     /// Visible transport icons, selected off main for the current camera.
     @State private var reviewTransportIcons: [DFKTransportIconPoint] = []
     // Map content and footprint groups, built off main per input revision.
@@ -1759,7 +1769,7 @@ struct DFKMapView: View {
         let diameter = transportIconSize
         let task = Task.detached(priority: .userInitiated) {
             (
-                segments: geometry.visibleSegments(in: region, baseCell: baseCell),
+                segments: BrowseRouteBatch(lines: geometry.visibleSegments(in: region, baseCell: baseCell).map { .init(polyline: $0.polyline, dashed: $0.isDashed) }),
                 icons: geometry.iconPoints(in: region, culls: culls, viewWidth: viewWidth, diameter: diameter)
             )
         }
@@ -1769,7 +1779,7 @@ struct DFKMapView: View {
             task.cancel()
         }
         guard !Task.isCancelled, geometry.key == reviewTransportGeometry.key else { return }
-        reviewVisibleSegments = result.segments
+        reviewRoutes = result.segments
         reviewTransportIcons = result.icons
     }
 
@@ -2275,10 +2285,14 @@ struct DFKMapView: View {
                                         )
                                     }
                                 }
-                                .mapStyle(.standard(
-                                    elevation: playbackOverlay == nil ? .automatic : .flat,
-                                    emphasis: .muted
-                                ))
+                                .background {
+                                    BrowseMapRoutes(routes: usesReviewTransportOverview ? reviewRoutes : mapContent.mapRoutes,
+                                                    highlighted: playbackOverlay?.highlightedRoutes ?? .empty,
+                                                    playing: playbackOverlay != nil)
+                                }
+                                .browseMapStyle(
+                                    elevation: playbackOverlay == nil ? .automatic : .flat
+                                )
                                 .overlay {
                                     if centersPlaybackMarkerOnScreen,
                                        let playbackOverlay,
@@ -2367,9 +2381,8 @@ struct DFKMapView: View {
                 }
             }
             .onAppear {
-                guard isInteractive else { return }
+                guard isInteractive, !interactiveMapReady else { return }
                 interactiveActivationTask?.cancel()
-                interactiveMapReady = false
                 interactiveActivationTask = Task { @MainActor in
                     try? await Task.sleep(nanoseconds: 180_000_000)
                     if Task.isCancelled { return }
@@ -2434,7 +2447,6 @@ struct DFKMapView: View {
             }
             .onDisappear {
                 interactiveActivationTask?.cancel()
-                interactiveMapReady = false
                 snapshotTask?.cancel()
                 isSnapshotLoading = false
             }
@@ -2493,6 +2505,7 @@ struct DFKMapView: View {
                 .resizable()
                 .scaledToFill()
                 .clipped()
+                .allowsHitTesting(false)
         } else {
             placeholderView
         }
@@ -2508,6 +2521,7 @@ struct DFKMapView: View {
                 startPoint: .topLeading,
                 endPoint: .bottomTrailing
             )
+            .allowsHitTesting(false)
 
             VStack(spacing: 8) {
                 Image(systemName: hasVisibleContent ? "map" : "map.fill")
@@ -2531,6 +2545,8 @@ struct DFKMapView: View {
                             triggerSnapshotRetry()
                         }
                         .font(.caption2)
+                        .padding(8)
+                        .contentShape(Rectangle())
                     }
                 } else {
                     ProgressView()
@@ -2538,6 +2554,7 @@ struct DFKMapView: View {
                         .tint(.secondary)
                 }
             }
+            .allowsHitTesting(snapshotLoadFailed && !isSnapshotLoading)
         }
         .clipped()
     }
@@ -2636,17 +2653,8 @@ struct DFKMapView: View {
         let size = transportIconSize
         let iconSize: CGFloat = isMiniTimelineMode ? 4 : (isInteractive ? 9 : 7)
         
-        let transportIcon = ZStack {
-            Circle()
-                .fill(Color(uiColor: .systemBackground))
-                .frame(width: size, height: size)
-                .overlay(Circle().stroke(Color.dfkAccent, lineWidth: 1.2))
-
-            Image(systemName: transport.currentType.sfSymbol)
-                .font(.system(size: iconSize, weight: .bold))
-                .foregroundColor(Color.dfkAccent)
-                .scaleEffect(x: display.travelsWest ? -1 : 1, y: 1)
-        }
+        let transportIcon = RouteTransportMarker(icon: transport.currentType.sfSymbol,
+                                                travelsWest: display.travelsWest, size: size, iconSize: iconSize)
         .contentShape(Circle())
 
         if let onTimelineItemTap {
@@ -2661,35 +2669,12 @@ struct DFKMapView: View {
     }
 
     private func transportOverviewIcon(_ point: DFKTransportIconPoint) -> some View {
-        // Same size as the footprint map's interactive transport icons.
-        Circle()
-            .fill(Color(uiColor: .systemBackground))
-            .frame(width: 18, height: 18)
-            .overlay(Circle().stroke(Color.dfkAccent, lineWidth: 1.2))
-            .overlay {
-                Image(systemName: point.type.sfSymbol)
-                    .font(.system(size: 9, weight: .bold))
-                    .foregroundStyle(Color.dfkAccent)
-                    .scaleEffect(x: point.travelsWest ? -1 : 1, y: 1)
-            }
+        RouteTransportMarker(icon: point.type.sfSymbol, travelsWest: point.travelsWest)
     }
 
     @MapContentBuilder
     private func transportMapContent() -> some MapContent {
         if usesReviewTransportOverview {
-            ForEach(reviewVisibleSegments) { segment in
-                MapPolyline(segment.polyline)
-                    .stroke(
-                        Color.dfkAccent.opacity(segment.isDashed ? 0.4 : 0.65),
-                        style: StrokeStyle(
-                            lineWidth: segment.isDashed ? 1 : 2.5,
-                            lineCap: .round,
-                            lineJoin: .round,
-                            dash: segment.isDashed ? [4, 4] : []
-                        )
-                    )
-            }
-
             if playbackOverlay == nil {
                 ForEach(displayedTransportIconPoints) { point in
                     Annotation("", coordinate: point.coordinate) {
@@ -2699,23 +2684,6 @@ struct DFKMapView: View {
                 }
             }
         } else {
-            ForEach(renderedTransportSegments) { segment in
-                MapPolyline(coordinates: segment.coordinates)
-                    .stroke(
-                        Color.dfkAccent.opacity(
-                            playbackOverlay == nil
-                                ? (segment.isDashed ? 0.4 : 0.7)
-                                : (segment.isDashed ? 0.18 : 0.24)
-                        ),
-                        style: StrokeStyle(
-                            lineWidth: segment.isDashed ? 1 : (isInteractive ? 3 : 2),
-                            lineCap: .round,
-                            lineJoin: .round,
-                            dash: segment.isDashed ? [4, 4] : []
-                        )
-                    )
-            }
-
             ForEach(renderedTransportAnnotationItems) { display in
                 if playbackOverlay == nil,
                    !mergedTransportIconIDs.contains(display.id),
@@ -2744,18 +2712,6 @@ struct DFKMapView: View {
                         .mapAnnotationLayer(MapAnnotationLayer.footprint)
                     }
                 }
-            }
-            ForEach(playbackOverlay.highlightedSegments) { segment in
-                MapPolyline(coordinates: segment.coordinates)
-                    .stroke(
-                        Color.dfkAccent,
-                        style: StrokeStyle(
-                            lineWidth: segment.isDashed ? 1.5 : 4,
-                            lineCap: .round,
-                            lineJoin: .round,
-                            dash: segment.isDashed ? [5, 5] : []
-                        )
-                    )
             }
             if !centersPlaybackMarkerOnScreen, !playbackOverlay.isMarkerHidden {
                 Annotation(
@@ -2875,7 +2831,9 @@ struct DFKMapView: View {
         let w = Int(size.width / 10) * 10
         let h = Int(size.height / 10) * 10
         let sizeKey = "\(w)x\(h)"
-        let styleKey = colorScheme == .dark ? "dark" : "light"
+        let preferences = BrowseMapSettings.shared.value
+        let schemeKey = colorScheme == .dark ? "dark" : "light"
+        let styleKey = preferences == BrowseMapPreferences() ? schemeKey : "\(colorScheme)-\(preferences.cacheKey)"
         let insetKey = "inset:\(Int(topContentInset.rounded())):\(Int(bottomContentInset.rounded()))"
         let routeStyleKey = usesReviewTransportOverview
             ? "review-routes-share-style-v3:\(reviewTransportGeometry.key ?? "pending"):\(reviewTransportIcons.count)"
@@ -3002,22 +2960,35 @@ struct DFKMapView: View {
         guard let region = snapshotRegion(for: size) else { return nil }
 
         let aggregated = aggregatedFootprints
-        let footprintPhotoIDs = Array(Set(aggregated.compactMap { latestPhotoAssetID(for: $0) }))
-        let standalonePhotoIDs = Array(Set(photoAssets.map(\.localIdentifier)))
+        let clusterPlaces = clustersPlacesByMapScale
+        let activityIcons = prefersActivityIcons
+        let standaloneAssets = shouldDrawStandalonePhotosInSnapshot ? photoAssets : []
         let footprintPhotoImages = await Task.detached(priority: .userInitiated) {
-            await DFKMapPhotoImageLoader.images(for: footprintPhotoIDs, targetSize: CGSize(width: 88, height: 88), highQuality: true)
+            let ids = aggregated.compactMap { group -> String? in
+                let drawsPhoto = clusterPlaces ? group.placeCount > 1 : !activityIcons
+                return drawsPhoto ? group.latestPhotoAssetID : nil
+            }
+            return await DFKMapPhotoImageLoader.images(for: Array(Set(ids)), targetSize: CGSize(width: 88, height: 88), highQuality: true)
         }.value
+        guard !Task.isCancelled else { return nil }
         let standalonePhotoImages = await Task.detached(priority: .userInitiated) {
-            await DFKMapPhotoImageLoader.images(for: standalonePhotoIDs, targetSize: CGSize(width: 80, height: 80), highQuality: true)
+            let ids = Array(Set(standaloneAssets.map(\.localIdentifier)))
+            return await DFKMapPhotoImageLoader.images(for: ids, targetSize: CGSize(width: 80, height: 80), highQuality: true)
         }.value
+        guard !Task.isCancelled else { return nil }
 
         let scale = UIScreen.main.scale
         let options = MKMapSnapshotter.Options()
+        let preferences = BrowseMapSettings.shared.value
+        let mapScheme = preferences.scheme ?? colorScheme
+        if preferences.theme != .standard || preferences.places != .page {
+            options.preferredConfiguration = preferences.configuration(defaultFilter: nil)
+        }
         options.region = region
         options.size = size
         options.scale = scale
         options.traitCollection = UITraitCollection(
-            userInterfaceStyle: colorScheme == .dark ? .dark : .light
+            userInterfaceStyle: mapScheme == .dark ? .dark : .light
         )
 
         let snapshotter = MKMapSnapshotter(options: options)
@@ -3054,7 +3025,7 @@ struct DFKMapView: View {
                     fontSize: 5.5 * constantScale
                 ))
             }
-            let imageRenderer = ImageRenderer(content: marker.environment(\.colorScheme, colorScheme))
+            let imageRenderer = ImageRenderer(content: marker.environment(\.colorScheme, mapScheme))
             imageRenderer.scale = scale
             guard let image = imageRenderer.uiImage else { return nil }
             return (aggregated.coordinate, image)
@@ -3070,8 +3041,9 @@ struct DFKMapView: View {
             region: region,
             size: size,
             scale: scale,
-            isDark: colorScheme == .dark,
+            isDark: mapScheme == .dark,
             themeColor: UIColor(named: "AccentColor") ?? .systemTeal,
+            preferences: preferences,
             deepRedColor: UIColor(Color.dfkDeepRed),
             placeCircles: mapContent.snapshotPlaceCircles,
             usesReviewTransportOverview: usesReviewTransportOverview,
@@ -3230,6 +3202,10 @@ private struct StableInteractiveMapView: UIViewRepresentable {
 
     func makeUIView(context: Context) -> MKMapView {
         let mapView = SafeMKMapView(frame: CGRect(x: 0, y: 0, width: 1, height: 1))
+        mapView.updateRouteAppearance = { [weak mapView, weak coordinator = context.coordinator] preferences in
+            guard let mapView, let coordinator else { return }
+            coordinator.refreshRouteAppearance(in: mapView, preferences: preferences)
+        }
         mapView.delegate = context.coordinator
         mapView.mapType = .standard
         mapView.showsCompass = false
@@ -3415,14 +3391,11 @@ private struct StableInteractiveMapView: UIViewRepresentable {
                 let annotation = MapImageAnnotation(
                     coordinate: midpoint,
                     kind: .transport(display.transport.id.uuidString),
-                    image: context.coordinator.cachedImage(key: "t:\(display.transport.currentType.sfSymbol):\(display.travelsWest):\(colorScheme == .dark)") {
-                        Coordinator.transportImage(
-                            symbolName: display.transport.currentType.sfSymbol,
-                            travelsWest: display.travelsWest
-                        )
-                    }
+                    image: context.coordinator.transportImage(symbol: display.transport.currentType.sfSymbol,
+                                                              west: display.travelsWest, map: mapView,
+                                                              preferences: BrowseMapSettings.shared.value)
                 )
-                context.coordinator.transportIconRoutes.append((annotation, display.coordinates, midpoint, display.transport.currentType.rawValue))
+                context.coordinator.transportIconRoutes.append((annotation, display.coordinates, midpoint, display.transport.currentType.rawValue, display.travelsWest))
                 mapView.addAnnotation(annotation)
             }
         }
@@ -3510,7 +3483,7 @@ private struct StableInteractiveMapView: UIViewRepresentable {
         /// Transport icons with their routes, moved to the middle of the
         /// visible part of each route after every camera move; nearby
         /// same-type icons are merged into one.
-        var transportIconRoutes: [(annotation: MapImageAnnotation, coordinates: [CLLocationCoordinate2D], midpoint: CLLocationCoordinate2D, type: String)] = []
+        var transportIconRoutes: [(annotation: MapImageAnnotation, coordinates: [CLLocationCoordinate2D], midpoint: CLLocationCoordinate2D, type: String, travelsWest: Bool)] = []
         var transportIconTask: Task<Void, Never>?
         var transportHitRoutes: [DFKTransportRouteHitTesting.Route] = []
         var transportRouteHitTask: Task<Void, Never>?
@@ -3613,6 +3586,27 @@ private struct StableInteractiveMapView: UIViewRepresentable {
             }
         }
 
+        func refreshRouteAppearance(in mapView: MKMapView, preferences: BrowseMapPreferences) {
+            for entry in transportIconRoutes {
+                guard let type = TransportType(rawValue: entry.type) else { continue }
+                let image = transportImage(symbol: type.sfSymbol, west: entry.travelsWest, map: mapView, preferences: preferences)
+                entry.annotation.image = image
+                mapView.view(for: entry.annotation)?.image = image
+            }
+            for case let line as MKPolyline in mapView.overlays {
+                if let renderer = mapView.renderer(for: line) as? BrowseRouteRenderer {
+                    configure(renderer, line: line, map: mapView, preferences: preferences)
+                }
+            }
+        }
+
+        private func configure(_ renderer: BrowseRouteRenderer, line: MKPolyline, map: MKMapView, preferences: BrowseMapPreferences) {
+            guard let base = overlayStyles[ObjectIdentifier(line)] else { return }
+            renderer.configure(preferences, traits: map.traitCollection, width: base.lineWidth,
+                               dash: base.dashPattern?.map { CGFloat($0.doubleValue) } ?? [],
+                               alpha: base.strokeColor.cgColor.alpha)
+        }
+
         func mapView(_ mapView: MKMapView, rendererFor overlay: MKOverlay) -> MKOverlayRenderer {
             let style = overlayStyles[ObjectIdentifier(overlay)]
 
@@ -3625,12 +3619,8 @@ private struct StableInteractiveMapView: UIViewRepresentable {
             }
 
             if let polyline = overlay as? MKPolyline {
-                let renderer = MKPolylineRenderer(polyline: polyline)
-                renderer.strokeColor = style?.strokeColor ?? UIColor(Color.dfkAccent)
-                renderer.lineWidth = style?.lineWidth ?? 5
-                renderer.lineCap = .round
-                renderer.lineJoin = .round
-                renderer.lineDashPattern = style?.dashPattern
+                let renderer = BrowseRouteRenderer(polyline: polyline)
+                configure(renderer, line: polyline, map: mapView, preferences: BrowseMapSettings.shared.value)
                 return renderer
             }
 
@@ -3711,27 +3701,13 @@ private struct StableInteractiveMapView: UIViewRepresentable {
 
         static let transportImageSize: CGFloat = 20
 
-        static func transportImage(symbolName: String, travelsWest: Bool) -> UIImage {
-            let size = CGSize(width: transportImageSize, height: transportImageSize)
-            let renderer = UIGraphicsImageRenderer(size: size)
-            return renderer.image { context in
-                let rect = CGRect(origin: .zero, size: size)
-                let path = UIBezierPath(ovalIn: rect)
-                UIColor.systemBackground.setFill()
-                path.fill()
-                UIColor(Color.dfkAccent).setStroke()
-                path.lineWidth = 1.2
-                path.stroke()
-
-                if let sourceImage = UIImage(systemName: symbolName) {
-                    let iconImage = travelsWest ? sourceImage.withHorizontallyFlippedOrientation() : sourceImage
-                    iconImage
-                        .withTintColor(UIColor(Color.dfkAccent), renderingMode: .alwaysOriginal)
-                        .draw(in: CGRect(x: 5, y: 5, width: 10, height: 10))
-                }
+        func transportImage(symbol: String, west: Bool, map: MKMapView, preferences: BrowseMapPreferences) -> UIImage {
+            let dark = map.traitCollection.userInterfaceStyle == .dark
+            return cachedImage(key: "transport:\(symbol):\(west):\(preferences.colorHex):\(dark)") {
+                RouteTransportMarker.image(icon: symbol, travelsWest: west, tint: preferences.color(),
+                                           scheme: dark ? .dark : .light)
             }
         }
-
 
         static func photoImage() -> UIImage {
             let bodySize: CGFloat = 28
@@ -3828,7 +3804,7 @@ private final class MapImageAnnotation: NSObject, MKAnnotation {
 
     let kind: Kind
     dynamic var coordinate: CLLocationCoordinate2D
-    let image: UIImage
+    var image: UIImage
     let centerOffset: CGPoint
     /// A transport icon hidden behind a nearby same-type icon.
     var isMerged = false

@@ -17,6 +17,7 @@ struct MapPickerView: View {
     var body: some View {
         GeometryReader { proxy in
             _MapPickerView(
+                containerWidth: proxy.size.width,
                 selectedCoord: $selectedCoord,
                 radius: $radius,
                 address: $address,
@@ -34,6 +35,7 @@ struct MapPickerView: View {
 }
 
 struct _MapPickerView: UIViewRepresentable {
+    let containerWidth: CGFloat
     @Binding var selectedCoord: CLLocationCoordinate2D?
     @Binding var radius: Float
     @Binding var address: String
@@ -68,8 +70,8 @@ struct _MapPickerView: UIViewRepresentable {
             )
         // If we have a radius already (Edit Mode), calculate the initial zoom to fit the circle
         } else if let currentRadius = radius > 0 ? radius : nil {
-            let screenWidth = UIScreen.main.bounds.width
-            let ratio = screenWidth / 120.0 
+            let mapWidth = IPhoneDuo.isCurrent ? max(1, containerWidth) : UIScreen.main.bounds.width
+            let ratio = mapWidth / 120.0
             let region = MKCoordinateRegion(center: center, 
                                           latitudinalMeters: Double(currentRadius) * 2 * ratio,
                                           longitudinalMeters: Double(currentRadius) * 2 * ratio)

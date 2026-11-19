@@ -143,6 +143,7 @@ class AppConfig {
     var routeVideoExportMarkerScale: Double { double(forKey: "ROUTE_VIDEO_EXPORT_MARKER_SCALE") }
     var routeVideoExportRouteLineScale: Double { double(forKey: "ROUTE_VIDEO_EXPORT_ROUTE_LINE_SCALE") }
     var routeVideoExportCinematicTransitionDuration: Double { double(forKey: "ROUTE_VIDEO_EXPORT_CINEMATIC_TRANSITION_DURATION") }
+    var routeVideoSnapshotTimeout: TimeInterval { double(forKey: "ROUTE_VIDEO_SNAPSHOT_TIMEOUT_SECONDS") }
     var routeVideoExportShotSnapshotMaxEdge: Double { double(forKey: "ROUTE_VIDEO_EXPORT_SHOT_SNAPSHOT_MAX_EDGE") }
     var routeVideoExportShotSnapshotMaxDownscale: Double { double(forKey: "ROUTE_VIDEO_EXPORT_SHOT_SNAPSHOT_MAX_DOWNSCALE") }
     var dayRoutePlaybackTransportCameraSpanRatio: Double { double(forKey: "DAY_ROUTE_PLAYBACK_TRANSPORT_CAMERA_SPAN_RATIO") }

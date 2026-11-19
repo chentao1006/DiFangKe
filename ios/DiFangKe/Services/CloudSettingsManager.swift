@@ -10,6 +10,7 @@ class CloudSettingsManager: ObservableObject {
     private var periodicSyncInterval: TimeInterval { AppConfig.shared.cloudPeriodicSyncInterval }
     
     private let syncedKeys = [
+        BrowseMapSettings.storageKey,
         "isAiAssistantEnabled",
         "aiServiceType",
         "isICloudSyncEnabled",
@@ -26,6 +27,7 @@ class CloudSettingsManager: ObservableObject {
     private init() {
         // 当云端数据变化时，同步到本地
         NotificationCenter.default.publisher(for: NSUbiquitousKeyValueStore.didChangeExternallyNotification)
+            .receive(on: DispatchQueue.main)
             .sink { [weak self] notification in
                 self?.handleExternalChange(notification)
             }
@@ -70,16 +72,10 @@ class CloudSettingsManager: ObservableObject {
         var notificationChanged = false
 
         for key in syncedKeys {
-            if let cloudValue = kvs.object(forKey: key) {
-                let localValue = UserDefaults.standard.object(forKey: key)
-                if !isEqual(cloudValue, localValue) {
-                    let localValueDescription = localValue ?? "nil"
-                    print("[CloudSettings] Key '\(key)' updated from cloud: \(localValueDescription) -> \(cloudValue)")
-                    UserDefaults.standard.set(cloudValue, forKey: key)
-                    changedKeys.insert(key)
-                    if key.contains("Notification") {
-                        notificationChanged = true
-                    }
+            if applyCloudValue(forKey: key) {
+                changedKeys.insert(key)
+                if key.contains("Notification") {
+                    notificationChanged = true
                 }
             }
         }
@@ -102,7 +98,8 @@ class CloudSettingsManager: ObservableObject {
         }
     }
     
-    private func syncLocalToCloud(key: String) {
+    func syncLocalToCloud(key: String) {
+        guard shouldUseCloudServices, syncedKeys.contains(key) else { return }
         let localValue = UserDefaults.standard.object(forKey: key)
         let cloudValue = kvs.object(forKey: key)
         
@@ -113,7 +110,7 @@ class CloudSettingsManager: ObservableObject {
     }
     
     private func handleExternalChange(_ notification: Notification) {
-        guard let userInfo = notification.userInfo,
+        guard shouldUseCloudServices, let userInfo = notification.userInfo,
               let reason = userInfo[NSUbiquitousKeyValueStoreChangeReasonKey] as? Int,
               reason == NSUbiquitousKeyValueStoreServerChange || reason == NSUbiquitousKeyValueStoreInitialSyncChange else {
             return
@@ -126,26 +123,30 @@ class CloudSettingsManager: ObservableObject {
         print("[CloudSettings] External change detected for keys: \(changedKeys)")
         
         for key in changedKeys where syncedKeys.contains(key) {
-            if let newValue = kvs.object(forKey: key) {
-                let localValue = UserDefaults.standard.object(forKey: key)
-                if !isEqual(newValue, localValue) {
-                    print("[CloudSettings] Externally updating local key '\(key)': \(localValue ?? "nil") -> \(newValue)")
-                    UserDefaults.standard.set(newValue, forKey: key)
-                    
-                    // 如果是通知相关的设置，同步更新通知计划
-                    if key.contains("Notification") {
-                        NotificationManager.shared.refreshSettings()
-                    }
-                    
-                    // 如果收到数据同步脉冲，通知 UI 可能需要刷新
-                    if key == "dataSyncPulse" {
-                        NotificationCenter.default.post(name: NSNotification.Name("RemoteDataChanged"), object: nil)
-                    }
-                }
+            guard applyCloudValue(forKey: key) else { continue }
+            if key.contains("Notification") {
+                NotificationManager.shared.refreshSettings()
+            }
+            if key == "dataSyncPulse" {
+                NotificationCenter.default.post(name: NSNotification.Name("RemoteDataChanged"), object: nil)
             }
         }
     }
-    
+
+    private func applyCloudValue(forKey key: String) -> Bool {
+        guard let cloudValue = kvs.object(forKey: key),
+              !isEqual(cloudValue, UserDefaults.standard.object(forKey: key)) else { return false }
+
+        if key == BrowseMapSettings.storageKey {
+            guard let saved = cloudValue as? [String: String] else { return false }
+            UserDefaults.standard.set(saved, forKey: key)
+            BrowseMapSettings.shared.applyCloudValue(saved)
+        } else {
+            UserDefaults.standard.set(cloudValue, forKey: key)
+        }
+        return true
+    }
+
     /// 当重要数据（如地点、活动类型）变更时，触发一个云端脉冲，通过 KVS 几乎瞬间通知其他设备数据已变
     func triggerDataSyncPulse() {
         // 按新策略：不再自动触发脉冲，避免导致远端立即同步风暴。

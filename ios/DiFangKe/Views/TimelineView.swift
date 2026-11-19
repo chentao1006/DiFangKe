@@ -292,6 +292,7 @@ struct TimelineScene<Content: View>: View {
     @Query(sort: \Place.name) private var allPlaces: [Place]
     @Query(sort: [SortDescriptor(\ActivityType.sortOrder), SortDescriptor(\ActivityType.name)]) private var allActivities: [ActivityType]
     @State private var cameraPosition: MapCameraPosition = .automatic
+    @State private var lastBrowsingCamera: MapCamera?
     @State private var showLocationSettingsAlert = false
     @State private var showingArrivalConfirmation = false
     @State private var loadedDates: [Date] = []
@@ -349,7 +350,7 @@ struct TimelineScene<Content: View>: View {
     @State private var dayPlaybackVideoTitle = ""
     @State private var dayPlaybackFrameIndex = 0
     @State private var requestedDayPlaybackFrameIndex = 0
-    @State private var dayPlaybackHighlightedSegments: [TransportLineSegment] = []
+    @State private var dayPlaybackHighlightedRoutes = BrowseRouteBatch.empty
     @State private var dayPlaybackRevision = 0
     @State private var routeVideoExportPresentation: RouteVideoExportPresentation?
     @State private var isDayPlaybackPaused = false
@@ -410,6 +411,20 @@ struct TimelineScene<Content: View>: View {
             scenePhase != .active
     }
 
+    @Environment(\.duoVerticalBarEdge) private var verticalBarEdge
+
+    private var collapsedPlaybackInset: CGFloat {
+        collapsedTimelineDetentHeight + (verticalBarEdge == nil ? nativeTabBarHeight : 0) + 32
+    }
+
+    private var mapIgnoredEdges: Edge.Set {
+        var edges: Edge.Set = isSideBySide ? [.top, .bottom, .trailing] : .all
+        if let verticalBarEdge {
+            edges.remove(verticalBarEdge == .leading ? .leading : .trailing)
+        }
+        return edges
+    }
+
     private var currentTrailingSafeAreaInset: CGFloat {
         for scene in UIApplication.shared.connectedScenes {
             guard let windowScene = scene as? UIWindowScene else { continue }
@@ -447,7 +462,7 @@ struct TimelineScene<Content: View>: View {
             isStop: frame.isStop,
             isMarkerHidden: frame.isStop && (isDayPlaybackFramingStop || isDayPlaybackRecentering),
             travelsWest: frame.travelsWest,
-            highlightedSegments: dayPlaybackHighlightedSegments,
+            highlightedRoutes: dayPlaybackHighlightedRoutes,
             stopMarkers: dayPlayback.stopMarkers,
             revealedStopCount: frame.completedStopCount
         )
@@ -477,7 +492,13 @@ struct TimelineScene<Content: View>: View {
 
     private var mapContent: some View {
         DFKMapView(
-            cameraPosition: $cameraPosition,
+            cameraPosition: Binding(
+                get: { cameraPosition },
+                set: { position, transaction in
+                    guard isActive else { return }
+                    withTransaction(transaction) { cameraPosition = position }
+                }
+            ),
             isInteractive: true,
             showsUserLocation: selectedFootprint == nil && dayPlaybackDate == nil,
             points: mapPoints,
@@ -497,6 +518,11 @@ struct TimelineScene<Content: View>: View {
             },
             onMapTouchChanged: handleDayPlaybackMapTouch,
             onCameraChanged: { camera, region in
+                guard isActive else { return }
+                if dayPlaybackDate == nil, camera.distance.isFinite, camera.distance > 0,
+                   isRenderableMapRegion(region) {
+                    lastBrowsingCamera = camera
+                }
                 if dayPlaybackDate != nil,
                    isTouchingDayPlaybackMap ||
                     isDayPlaybackRecentering ||
@@ -641,7 +667,7 @@ struct TimelineScene<Content: View>: View {
 
             if !replacesActivePlayback {
                 timelineDetentBeforeDayPlayback = timelineDetent
-                cameraPositionBeforeDayPlayback = cameraPosition
+                cameraPositionBeforeDayPlayback = cameraPosition.followsUserLocation ? cameraPosition : (lastBrowsingCamera.map { .camera($0) } ?? cameraPosition)
                 visibleTimelineItemsBeforeDayPlayback = visibleTimelineItems
                 mapInteractionLockBeforeDayPlayback = mapInteractionLockedVisibleDates
                 activeTimelineDateBeforeDayPlayback = activeTimelineDate
@@ -662,7 +688,7 @@ struct TimelineScene<Content: View>: View {
                 dayPlaybackItems = items
                 dayPlaybackDate = normalizedDate
                 dayPlaybackVideoTitle = videoTitle
-                dayPlaybackHighlightedSegments = []
+                dayPlaybackHighlightedRoutes = .empty
             }
             activeTimelineDate = normalizedDate
             dayPlaybackFrameIndex = 0
@@ -724,7 +750,7 @@ struct TimelineScene<Content: View>: View {
             dayPlaybackItems = []
             dayPlaybackDate = nil
             dayPlaybackVideoTitle = ""
-            dayPlaybackHighlightedSegments = []
+            dayPlaybackHighlightedRoutes = .empty
         }
         dayPlaybackFrameIndex = 0
         requestedDayPlaybackFrameIndex = 0
@@ -818,7 +844,7 @@ struct TimelineScene<Content: View>: View {
         transaction.disablesAnimations = true
         withTransaction(transaction) {
             dayPlaybackFrameIndex = resolved.index
-            dayPlaybackHighlightedSegments = resolved.highlightedSegments
+            dayPlaybackHighlightedRoutes = resolved.mapRoutes
             if !framesSegmentCamera {
                 centerDayPlaybackCamera(frameIndex: index)
             } else if !frame.isStop,
@@ -849,7 +875,7 @@ struct TimelineScene<Content: View>: View {
         let controlHeight = max(dayPlaybackControlSize.height, 48)
         let bottomInset = isSideBySide
             ? 48
-            : collapsedTimelineDetentHeight + nativeTabBarHeight + 32 + controlHeight + 16
+            : collapsedPlaybackInset + controlHeight + 16
         let visibleHeight = max(viewport.height - topInset - bottomInset, viewport.height * 0.25)
         return (
             viewport,
@@ -1151,7 +1177,6 @@ struct TimelineScene<Content: View>: View {
             timelineDetent: $timelineDetent,
             isCalendarScrollLocked: $isCalendarScrollLocked,
             isSideBySide: isSideBySide,
-            isPlaybackMinimized: dayPlaybackDate != nil,
             selectedFootprint: $selectedFootprint,
             selectedFootprintStartsExpanded: $selectedFootprintStartsExpanded,
             selectedTransport: $selectedTransport,
@@ -1213,7 +1238,7 @@ struct TimelineScene<Content: View>: View {
                             .trailing,
                             isSideBySide ? max(20, currentTrailingSafeAreaInset + 12) : 20
                         )
-                        .padding(.bottom, isSideBySide ? 0 : collapsedTimelineDetentHeight + nativeTabBarHeight + 32)
+                        .padding(.bottom, isSideBySide ? 0 : collapsedPlaybackInset)
                         .frame(
                             maxWidth: .infinity,
                             maxHeight: .infinity,
@@ -1224,7 +1249,7 @@ struct TimelineScene<Content: View>: View {
             .onAppear { updateMapViewportSize(geometry.size) }
             .onChange(of: geometry.size) { _, newSize in updateMapViewportSize(newSize) }
         }
-        .ignoresSafeArea(edges: isSideBySide ? [.top, .bottom, .trailing] : .all)
+        .ignoresSafeArea(edges: mapIgnoredEdges)
     }
 
     private var dayPlaybackProgress: Binding<Double> {
@@ -1448,8 +1473,13 @@ struct TimelineScene<Content: View>: View {
                     locationManager.allPlaces = newValue
                     locationManager.forceRefreshOngoingAnalysis()
                 }
+                .onChange(of: isSideBySide, initial: true) { _, isSidebar in
+                    if !isSidebar, dayPlaybackDate != nil {
+                        timelineDetent = .height(collapsedTimelineDetentHeight)
+                    }
+                }
                 .onChange(of: timelineDetent) { oldValue, newValue in
-                    if dayPlaybackDate != nil,
+                    if !isSideBySide, dayPlaybackDate != nil,
                        newValue != .height(collapsedTimelineDetentHeight) {
                         stopDayPlayback(restoresTimelineDetent: false)
                     }
@@ -1503,7 +1533,21 @@ struct TimelineScene<Content: View>: View {
                     scheduleLocationSettingsAlertIfNeeded()
                 }
                 .onChange(of: isActive) { _, active in
-                    if !active { stopDayPlayback() }
+                    if active {
+                        refreshVisibleTimelineMap(delayNanoseconds: 0)
+                    } else {
+                        visibleMapUpdateTask?.cancel()
+                        lockedMapCameraTask?.cancel()
+                        mapCameraTransitionTask?.cancel()
+                        if dayPlaybackDate == nil {
+                            // MapKit can write a user-positioned binding with no concrete
+                            // camera. Give a remounted map the viewport that was on screen.
+                            if !cameraPosition.followsUserLocation, let camera = lastBrowsingCamera {
+                                cameraPosition = .camera(camera)
+                            }
+                        }
+                        stopDayPlayback()
+                    }
                 }
                 .onChange(of: scenePhase) { _, phase in
                     guard phase == .active else { return }
@@ -1693,7 +1737,7 @@ struct TimelineScene<Content: View>: View {
     }
 
     private func updateMapViewportSize(_ size: CGSize) {
-        guard size.width > 1, size.height > 1 else { return }
+        guard isActive, size.width > 1, size.height > 1 else { return }
         guard abs(mapViewportSize.width - size.width) > 0.5 || abs(mapViewportSize.height - size.height) > 0.5 else { return }
         mapViewportSize = size
         if let footprint = selectedFootprint {
@@ -1841,6 +1885,7 @@ struct TimelineScene<Content: View>: View {
     }
 
     private func handleTimelineDetentChange(oldValue: PresentationDetent, newValue: PresentationDetent) {
+        guard isActive else { return }
         visibleMapUpdateTask?.cancel()
         let collapsedDetent = PresentationDetent.height(collapsedTimelineDetentHeight)
 
@@ -2780,6 +2825,7 @@ struct TimelineScene<Content: View>: View {
     }
 
     private func refreshVisibleTimelineMap(for visibleDates: Set<Date>? = nil, delayNanoseconds: UInt64 = 360_000_000) {
+        guard isActive else { return }
         guard isSideBySide || mapInteractionLockedVisibleDates == nil else { return }
         // A first long-distance calendar jump can otherwise start a large,
         // multi-step camera flight at the same time as ScrollViewReader is
@@ -3309,7 +3355,6 @@ private struct TimelineView: View {
     @Binding var timelineDetent: PresentationDetent
     @Binding var isCalendarScrollLocked: Bool
     let isSideBySide: Bool
-    let isPlaybackMinimized: Bool
     @Binding var selectedFootprint: Footprint?
     @Binding var selectedFootprintStartsExpanded: Bool
     @Binding var selectedTransport: Transport?
@@ -3337,8 +3382,7 @@ private struct TimelineView: View {
     @State private var selectedMapPhotoAssetIDs: [String] = []
 
     private var isCollapsed: Bool {
-        (!isSideBySide && timelineDetent == .height(collapsedTimelineDetentHeight)) ||
-            (isSideBySide && isPlaybackMinimized)
+        !isSideBySide && timelineDetent == .height(collapsedTimelineDetentHeight)
     }
 
     private var hasCoveringPresentation: Bool {
@@ -5061,9 +5105,10 @@ private struct TimelineView: View {
                         Button {
                             onPlayDay(Calendar.current.startOfDay(for: date))
                         } label: {
-                            Image(systemName: "play.fill")
-                                .font(.system(size: 12, weight: .semibold))
+                            Image(systemName: "play.circle")
+                                .font(.system(size: 16, weight: .semibold))
                                 .foregroundStyle(Color.dfkAccent)
+                                .offset(x: 4, y: 1)
                                 .frame(width: 36, height: height)
                                 .contentShape(Circle())
                         }
@@ -6708,14 +6753,16 @@ struct TimelineTransportMarker: View {
     let icon: String
     var travelsWest = false
 
+    var tint: Color = .dfkAccent
+
     var body: some View {
         Image(systemName: icon)
             .font(.system(size: 9, weight: .bold))
-            .foregroundStyle(Color.dfkAccent)
+            .foregroundStyle(tint)
             .scaleEffect(x: travelsWest ? -1 : 1, y: 1)
             .frame(width: ContinuousTimelineLayout.markerSize - 4, height: ContinuousTimelineLayout.markerSize - 4)
             .background(Color(uiColor: .systemBackground), in: Circle())
-            .overlay(Circle().strokeBorder(Color.dfkAccent, lineWidth: 1.2))
+            .overlay(Circle().strokeBorder(tint, lineWidth: 1.2))
             .shadow(color: .black.opacity(0.15), radius: 2, x: 0, y: 2)
     }
 }

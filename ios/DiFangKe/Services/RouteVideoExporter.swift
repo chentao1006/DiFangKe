@@ -77,6 +77,7 @@ struct RouteVideoExportRequest: Sendable {
     let cameraMode: RouteVideoCameraMode
     let aspectRatio: RouteVideoAspectRatio
     let theme: RouteVideoResolvedTheme
+    let mapPreferences: BrowseMapPreferences
 }
 
 struct RouteVideoHeader: Sendable {
@@ -487,6 +488,7 @@ enum RouteVideoExporter {
         state: RouteVideoExportState
     ) async throws -> URL {
         let input = await RouteVideoInput.make(from: source)
+        try Task.checkCancellation()
         guard input.frames.count >= 2 else { throw RouteVideoExportError.noFrames }
         let coordinates = input.segments.flatMap(\.coordinates)
         let config = AppConfig.shared
@@ -502,7 +504,7 @@ enum RouteVideoExporter {
         }
 
         let outputSize = exportSize(for: request.aspectRatio)
-        let overviewOptions = snapshotOptions(theme: request.theme)
+        let overviewOptions = snapshotOptions(request: request)
         overviewOptions.region = region
         overviewOptions.size = outputSize
         overviewOptions.scale = max(config.routeVideoExportMapSnapshotScale, 1)
@@ -543,7 +545,7 @@ enum RouteVideoExporter {
                     isStop: frame.isStop,
                     isMarkerHidden: false,
                     travelsWest: frame.travelsWest,
-                    highlightedSegments: [],
+                    highlightedRoutes: .empty,
                     stopMarkers: [],
                     revealedStopCount: 0
                 )
@@ -685,9 +687,15 @@ enum RouteVideoExporter {
             brandImage: brandImage,
             headerImages: headerImages
         )
-        return try await Task.detached(priority: .userInitiated) {
+        try Task.checkCancellation()
+        let encodingTask = Task.detached(priority: .userInitiated) {
             try await encode(input: input, request: request, assets: assets, plan: plan, state: state)
-        }.value
+        }
+        return try await withTaskCancellationHandler {
+            try await encodingTask.value
+        } onCancel: {
+            encodingTask.cancel()
+        }
     }
 
     private nonisolated static func exportSize(for aspectRatio: RouteVideoAspectRatio) -> CGSize {
@@ -760,13 +768,11 @@ enum RouteVideoExporter {
         )
     }
 
-    private nonisolated static func snapshotOptions(theme: RouteVideoResolvedTheme) -> MKMapSnapshotter.Options {
+    private nonisolated static func snapshotOptions(request: RouteVideoExportRequest) -> MKMapSnapshotter.Options {
         let options = MKMapSnapshotter.Options()
-        options.mapType = .mutedStandard
-        options.showsBuildings = true
-        options.pointOfInterestFilter = .excludingAll
+        options.preferredConfiguration = request.mapPreferences.configuration(defaultFilter: .excludingAll)
         options.traitCollection = UITraitCollection(
-            userInterfaceStyle: theme == .dark ? .dark : .light
+            userInterfaceStyle: request.theme == .dark ? .dark : .light
         )
         return options
     }
@@ -777,7 +783,32 @@ enum RouteVideoExporter {
         options: MKMapSnapshotter.Options,
         calibrationRect: MKMapRect
     ) async throws -> SnapshotLayer {
-        let snapshot = try await MKMapSnapshotter(options: options).start()
+        try Task.checkCancellation()
+        let snapshotter = MKMapSnapshotter(options: options)
+        let (results, continuation) = AsyncThrowingStream<MKMapSnapshotter.Snapshot, Error>.makeStream()
+        let capture = Task {
+            do {
+                try Task.checkCancellation()
+                let snapshot = try await snapshotter.start()
+                continuation.yield(snapshot)
+                continuation.finish()
+            } catch {
+                continuation.finish(throwing: error)
+            }
+        }
+        let timeout = Task {
+            try await Task.sleep(for: .seconds(AppConfig.shared.routeVideoSnapshotTimeout))
+            continuation.finish(throwing: RouteVideoExportError.mapUnavailable)
+        }
+        defer {
+            timeout.cancel()
+            capture.cancel()
+            snapshotter.cancel()
+        }
+        var iterator = results.makeAsyncIterator()
+        let result = try await iterator.next()
+        try Task.checkCancellation()
+        guard let snapshot = result else { throw RouteVideoExportError.mapUnavailable }
         let first = MKMapPoint(x: calibrationRect.minX, y: calibrationRect.minY)
         let second = MKMapPoint(x: calibrationRect.maxX, y: calibrationRect.maxY)
         let firstPoint = snapshot.point(for: first.coordinate)
@@ -803,7 +834,7 @@ enum RouteVideoExporter {
     /// stops and short walks stay sharp instead of magnifying the overview.
     private nonisolated static func shotLayer(
         _ shot: RouteVideoCameraShot,
-        theme: RouteVideoResolvedTheme
+        request: RouteVideoExportRequest
     ) async throws -> SnapshotLayer {
         let rect = shot.snapshotRect
         guard !rect.isNull, rect.width > 0, rect.height > 0, shot.mapPointsPerPixel > 0 else {
@@ -818,7 +849,7 @@ enum RouteVideoExporter {
         if longestEdge > maxEdge {
             size = CGSize(width: size.width * maxEdge / longestEdge, height: size.height * maxEdge / longestEdge)
         }
-        let options = snapshotOptions(theme: theme)
+        let options = snapshotOptions(request: request)
         options.mapRect = rect
         options.size = CGSize(width: max(size.width.rounded(), 1), height: max(size.height.rounded(), 1))
         options.scale = 1
@@ -841,6 +872,13 @@ enum RouteVideoExporter {
             .appendingPathComponent("difangke-route-\(UUID().uuidString).mp4")
         guard let writer = try? AVAssetWriter(outputURL: url, fileType: .mp4) else {
             throw RouteVideoExportError.writerUnavailable
+        }
+        var completed = false
+        defer {
+            if !completed {
+                if writer.status == .writing { writer.cancelWriting() }
+                try? FileManager.default.removeItem(at: url)
+            }
         }
         let settings: [String: Any] = [
             AVVideoCodecKey: AVVideoCodecType.h264,
@@ -878,7 +916,7 @@ enum RouteVideoExporter {
         // transition joins two adjacent shots), so at most three shot maps
         // are kept in memory at once.
         var shotLayers: [Int: SnapshotLayer] = [:]
-        var unavailableShots = Set<Int>()
+        var detailedMapsAvailable = true
 
         for outputIndex in 0..<frameCount {
             if Task.isCancelled {
@@ -896,18 +934,21 @@ enum RouteVideoExporter {
                 cachedHighlightedSegments = input.dayPlayback?.highlightedSegments(at: leadingIndex)
                     ?? input.frames[leadingIndex].highlightedSegments
             }
-            if plan.shotIndexByFrame.indices.contains(leadingIndex) {
+            if detailedMapsAvailable, plan.shotIndexByFrame.indices.contains(leadingIndex) {
                 let shotIndex = plan.shotIndexByFrame[leadingIndex]
                 let needed = max(0, shotIndex - 1)...min(plan.shots.count - 1, shotIndex + 1)
                 for key in shotLayers.keys where !needed.contains(key) {
                     shotLayers[key] = nil
                 }
-                for key in needed where shotLayers[key] == nil && !unavailableShots.contains(key) {
-                    if let layer = try? await shotLayer(plan.shots[key], theme: request.theme) {
+                for key in needed where shotLayers[key] == nil {
+                    if let layer = try? await shotLayer(plan.shots[key], request: request) {
                         shotLayers[key] = layer
                     } else {
                         // The overview layer still covers this shot.
-                        unavailableShots.insert(key)
+                        try Task.checkCancellation()
+                        shotLayers.removeAll()
+                        detailedMapsAvailable = false
+                        break
                     }
                 }
             }
@@ -917,7 +958,9 @@ enum RouteVideoExporter {
                 interpolation
             )
             let layers = [assets.overviewLayer] + shotLayers.values
+            try Task.checkCancellation()
             while !writerInput.isReadyForMoreMediaData {
+                guard writer.status == .writing else { throw writer.error ?? RouteVideoExportError.encodingFailed }
                 try await Task.sleep(nanoseconds: 2_000_000)
             }
             guard let pool = adaptor.pixelBufferPool else {
@@ -935,7 +978,7 @@ enum RouteVideoExporter {
                         layers: layers,
                         camera: camera,
                         highlightedSegments: cachedHighlightedSegments,
-                        theme: request.theme,
+                        request: request,
                         leadingIndex: leadingIndex,
                         trailingIndex: trailingIndex,
                         interpolation: interpolation,
@@ -956,7 +999,8 @@ enum RouteVideoExporter {
             if outputIndex % fps == 0 { ciContext.clearCaches() }
             if outputIndex % 15 == 0 {
                 let progress = 0.08 + 0.9 * Double(outputIndex) / Double(frameCount)
-                Task { @MainActor in
+                await MainActor.run {
+                    guard !Task.isCancelled else { return }
                     state.progress = progress
                     state.status = "正在生成视频 \(Int(progress * 100))%"
                 }
@@ -970,6 +1014,8 @@ enum RouteVideoExporter {
             try? FileManager.default.removeItem(at: url)
             throw writer.error ?? RouteVideoExportError.encodingFailed
         }
+        try Task.checkCancellation()
+        completed = true
         return url
     }
 
@@ -979,7 +1025,7 @@ enum RouteVideoExporter {
         layers: [SnapshotLayer],
         camera: RouteVideoCamera,
         highlightedSegments: [TransportLineSegment],
-        theme: RouteVideoResolvedTheme,
+        request: RouteVideoExportRequest,
         leadingIndex: Int,
         trailingIndex: Int,
         interpolation: Double,
@@ -1008,27 +1054,18 @@ enum RouteVideoExporter {
         return UIGraphicsImageRenderer(size: size, format: format).image { renderer in
             let context = renderer.cgContext
             let routeLineScale = CGFloat(max(AppConfig.shared.routeVideoExportRouteLineScale, 1))
-            context.setFillColor((theme == .dark ? UIColor.black : UIColor.white).cgColor)
+            context.setFillColor((request.theme == .dark ? UIColor.black : UIColor.white).cgColor)
             context.fill(CGRect(origin: .zero, size: size))
             for layer in drawnLayers {
                 layer.image.draw(in: camera.project(layer.rect, in: size))
             }
-            drawSegments(
-                input.segments,
-                project: project,
-                color: UIColor(Color.dfkAccent).withAlphaComponent(0.24),
-                isHighlighted: false,
-                lineScale: routeLineScale,
-                in: context
-            )
-            drawSegments(
-                highlightedSegments,
-                project: project,
-                color: UIColor(Color.dfkAccent),
-                isHighlighted: true,
-                lineScale: routeLineScale,
-                in: context
-            )
+            let traits = UITraitCollection(userInterfaceStyle: request.theme == .dark ? .dark : .light)
+            traits.performAsCurrent {
+                drawSegments(input.segments, project: project, preferences: request.mapPreferences,
+                             isHighlighted: false, lineScale: routeLineScale)
+                drawSegments(highlightedSegments, project: project, preferences: request.mapPreferences,
+                             isHighlighted: true, lineScale: routeLineScale)
+            }
             drawStops(
                 input.stops,
                 count: leading.completedStopCount,
@@ -1072,32 +1109,23 @@ enum RouteVideoExporter {
     private nonisolated static func drawSegments(
         _ segments: [TransportLineSegment],
         project: (CLLocationCoordinate2D) -> CGPoint,
-        color: UIColor,
+        preferences: BrowseMapPreferences,
         isHighlighted: Bool,
-        lineScale: CGFloat,
-        in context: CGContext
+        lineScale: CGFloat
     ) {
-        context.saveGState()
-        context.setStrokeColor(color.cgColor)
-        context.setLineCap(.round)
-        context.setLineJoin(.round)
         for segment in segments where segment.coordinates.count >= 2 {
-            let baseWidth: CGFloat = segment.isDashed
-                ? (isHighlighted ? 1.5 : 1.3)
-                : (isHighlighted ? 4 : 3)
-            context.setLineWidth(baseWidth * lineScale)
-            context.setLineDash(
-                phase: 0,
-                lengths: segment.isDashed ? [5 * lineScale, 5 * lineScale] : []
-            )
-            context.beginPath()
-            context.move(to: project(segment.coordinates[0]))
+            let path = UIBezierPath()
+            path.move(to: project(segment.coordinates[0]))
             for coordinate in segment.coordinates.dropFirst() {
-                context.addLine(to: project(coordinate))
+                path.addLine(to: project(coordinate))
             }
-            context.strokePath()
+            preferences.draw(path,
+                             baseWidth: segment.isDashed ? 1.5 : (isHighlighted ? 4 : 3),
+                             dash: segment.isDashed ? [5, 5] : [],
+                             baseAlpha: 1,
+                             baseColor: UIColor(Color.dfkAccent), scale: lineScale,
+                             playbackOpacity: isHighlighted ? 1 : BrowseMapPreferences.untraveledOpacity(dashed: segment.isDashed))
         }
-        context.restoreGState()
     }
 
     private nonisolated static func drawStops(
@@ -1219,7 +1247,7 @@ struct RouteVideoExportOptionsView: View {
     @State private var selectedTheme: RouteVideoTheme?
 
     private var theme: RouteVideoTheme {
-        selectedTheme ?? .matching(colorScheme)
+        selectedTheme ?? .matching(BrowseMapSettings.shared.value.scheme ?? colorScheme)
     }
 
     init(source: RouteVideoExportSource) {
@@ -1332,7 +1360,8 @@ struct RouteVideoExportOptionsView: View {
         let request = RouteVideoExportRequest(
             cameraMode: cameraMode,
             aspectRatio: aspectRatio,
-            theme: theme.resolved
+            theme: theme.resolved,
+            mapPreferences: BrowseMapSettings.shared.value
         )
         state.task = Task {
             do {
@@ -1348,10 +1377,8 @@ struct RouteVideoExportOptionsView: View {
                 state.outputURL = url
                 state.isExporting = false
                 state.task = nil
-            } catch is CancellationError {
-                state.isExporting = false
-                state.task = nil
             } catch {
+                guard !Task.isCancelled else { return }
                 state.isExporting = false
                 state.task = nil
                 state.errorMessage = error.localizedDescription

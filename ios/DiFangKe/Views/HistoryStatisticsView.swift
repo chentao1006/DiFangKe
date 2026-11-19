@@ -3048,9 +3048,9 @@ struct HistoryStatisticsView: View {
         }
         return reviewAvailableYears?.values ?? reviewDerived.availableYears
     }
-    private var usesIPadLayout: Bool {
-        UIDevice.current.userInterfaceIdiom == .pad
-    }
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+
+    private var usesWideReviewLayout: Bool { horizontalSizeClass == .regular }
 
     var body: some View {
         Group {
@@ -3120,11 +3120,11 @@ struct HistoryStatisticsView: View {
                 Section {
                     // Keep the review content mounted as one lazy child. In
                     // particular, recycling the map card when it scrolls out
-                    // discards its rendered snapshot and makes it load again
+                    // discards its map and makes it load again
                     // as soon as the user scrolls back to the top.
                     VStack(spacing: 22) {
                         if reviewRoutesReady {
-                            if usesIPadLayout {
+                            if usesWideReviewLayout {
                                 HStack(alignment: .top, spacing: 16) {
                                     reviewHeroSection
                                         .frame(maxWidth: .infinity)
@@ -3138,7 +3138,7 @@ struct HistoryStatisticsView: View {
                                 reviewHeroSection
                             }
 
-                            if !usesIPadLayout {
+                            if !usesWideReviewLayout {
                                 memorableSection
                             }
                             reviewBentoSection
@@ -3336,11 +3336,12 @@ struct HistoryStatisticsView: View {
             Color.clear
                 .aspectRatio(1.618, contentMode: .fit)
                 .padding(.bottom, 72)
+                .contentShape(Rectangle())
+                .onTapGesture { presentedSheet = .map }
 
             DFKMapView(
                 cameraPosition: $mapPosition,
-                isInteractive: false,
-                allowsGeneratedSnapshot: reviewRoutesReady,
+                isInteractive: true,
                 showsUserLocation: false,
                 timelineItems: reviewTimelineItemsCache,
                 prefersActivityIcons: false,
@@ -3349,12 +3350,13 @@ struct HistoryStatisticsView: View {
                 clustersPlacesByMapScale: true,
                 placeClusterRegion: reviewMapRegion,
                 showsUserDefinedPlaceRadii: false,
-                topContentInset: 32,
-                bottomContentInset: 76,
                 timelineUpdateIdentifier: reviewMapRevision,
                 showsMapControls: false
             )
+            .safeAreaPadding(.top, 32)
+            .safeAreaPadding(.bottom, 76)
             .allowsHitTesting(false)
+            .accessibilityHidden(true)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
 
             HStack(spacing: 0) {
@@ -3372,6 +3374,7 @@ struct HistoryStatisticsView: View {
                     .stroke(Color.white.opacity(0.42), lineWidth: 0.5)
             }
             .padding(12)
+            .allowsHitTesting(false)
         }
         .clipShape(RoundedRectangle(cornerRadius: 26, style: .continuous))
         .overlay {
@@ -3389,8 +3392,6 @@ struct HistoryStatisticsView: View {
             .padding(14)
             .accessibilityLabel("打开完整生活地图")
         }
-        .contentShape(RoundedRectangle(cornerRadius: 26, style: .continuous))
-        .onTapGesture { presentedSheet = .map }
         .padding(.horizontal, 16)
     }
 
@@ -3423,8 +3424,8 @@ struct HistoryStatisticsView: View {
                     .controlSize(.large)
                     .accessibilityLabel("正在加载回忆")
                     .frame(maxWidth: .infinity,
-                           minHeight: usesIPadLayout ? 0 : 248,
-                           maxHeight: usesIPadLayout ? .infinity : nil)
+                           minHeight: usesWideReviewLayout ? 0 : 248,
+                           maxHeight: usesWideReviewLayout ? .infinity : nil)
                     .background(Color(uiColor: .secondarySystemBackground), in: RoundedRectangle(cornerRadius: 24, style: .continuous))
                     .padding(.horizontal, 16)
             } else if featuredCandidate == nil && compactCandidates.isEmpty {
@@ -3450,7 +3451,7 @@ struct HistoryStatisticsView: View {
                             }
                             .padding(.horizontal, 16)
                         }
-                        .scrollClipDisabled(!usesIPadLayout)
+                        .scrollClipDisabled(!usesWideReviewLayout)
                     }
                 }
             }
@@ -3658,7 +3659,7 @@ struct HistoryStatisticsView: View {
             LazyVGrid(
                 columns: Array(
                     repeating: GridItem(.flexible(), spacing: 12, alignment: .top),
-                    count: usesIPadLayout ? 4 : 2
+                    count: usesWideReviewLayout ? 4 : 2
                 ),
                 spacing: 12
             ) {
@@ -6098,7 +6099,7 @@ private struct ReviewPlaceView: View {
                         Marker(selection.title, coordinate: coordinate)
                             .tint(Color.dfkAccent)
                     }
-                    .mapStyle(.standard)
+                    .browseMapStyle()
                     .frame(height: 170)
                     .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
                     .padding(.horizontal, 18)
