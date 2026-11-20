@@ -70,7 +70,10 @@ struct BrowseMapPreferences: Equatable {
                   pointsOfInterest: PointOfInterestCategories) -> MapStyle {
         let poi: PointOfInterestCategories = places == .page ? pointsOfInterest : (places == .show ? .all : .excludingAll)
         switch theme {
-        case .satellite: return .imagery(elevation: elevation)
+        // Imagery with `.automatic` or `.flat` elevation recognizes pan and
+        // pinch gestures but never moves the camera. Only realistic imagery
+        // remains interactive.
+        case .satellite: return .imagery(elevation: .realistic)
         case .hybrid: return .hybrid(elevation: elevation, pointsOfInterest: poi)
         default:
             return .standard(elevation: elevation, emphasis: theme == .muted ? .muted : .automatic,
@@ -234,7 +237,9 @@ final class BrowseRouteRenderer: MKPolylineRenderer {
             UIGraphicsPushContext(context)
             defer { UIGraphicsPopContext() }
             style.preferences.draw(UIBezierPath(cgPath: path), baseWidth: style.width, dash: style.dash,
-                                   baseAlpha: style.alpha, baseColor: UIColor(Color.dfkAccent), scale: 1 / zoomScale, playbackOpacity: style.playbackOpacity)
+                                   baseAlpha: style.alpha, baseColor: UIColor(Color.dfkAccent),
+                                   // Widths are in screen points, matching `MapPolyline` strokes.
+                                   scale: contentScaleFactor / zoomScale, playbackOpacity: style.playbackOpacity)
         }
     }
 }
@@ -245,8 +250,37 @@ final class BrowseRouteBatch: @unchecked Sendable {
     struct Line {
         let polyline: MKPolyline
         let dashed: Bool
+        /// MapKit draws an overlay object once, so every stroke layer needs its
+        /// own polyline. Copies are cached per source polyline to keep identity
+        /// stable when the same geometry is published again.
+        let layerPolylines: [BrowseMapPreferences.StrokeLayer: MKPolyline]
+
+        init(polyline: MKPolyline, dashed: Bool) {
+            self.polyline = polyline
+            self.dashed = dashed
+            layerPolylines = BrowseRouteBatch.layerPolylines(for: polyline)
+        }
     }
     let lines: [Line]
+
+    private static let layerCache = OSAllocatedUnfairLock(
+        uncheckedState: NSMapTable<MKPolyline, NSDictionary>.weakToStrongObjects()
+    )
+
+    private static func layerPolylines(for polyline: MKPolyline) -> [BrowseMapPreferences.StrokeLayer: MKPolyline] {
+        let layers: [BrowseMapPreferences.StrokeLayer] = [.outerGlow, .innerGlow, .border, .route]
+        return layerCache.withLockUnchecked { cache in
+            if let cached = cache.object(forKey: polyline) as? [BrowseMapPreferences.StrokeLayer: MKPolyline] {
+                return cached
+            }
+            var copies: [BrowseMapPreferences.StrokeLayer: MKPolyline] = [.route: polyline]
+            for layer in layers where layer != .route {
+                copies[layer] = MKPolyline(points: polyline.points(), count: polyline.pointCount)
+            }
+            cache.setObject(copies as NSDictionary, forKey: polyline)
+            return copies
+        }
+    }
     static let empty = BrowseRouteBatch(lines: [])
 
     init(lines: [Line]) { self.lines = lines }
@@ -260,142 +294,38 @@ final class BrowseRouteBatch: @unchecked Sendable {
     }
 }
 
-/// Let SwiftUI continue to own the camera, controls and annotations. Only
-/// overlays installed by this view use the same renderer as the style preview.
-struct BrowseMapRoutes: UIViewRepresentable {
+/// Route lines for SwiftUI maps. MapKit draws `MapPolyline` as vector
+/// overlays, so lines stay sharp and immediate while zooming, and SwiftUI keeps
+/// sole ownership of the map delegate. Batches are prepared off main; their
+/// polylines keep stable identity across camera-driven updates.
+struct BrowseMapRoutes: MapContent {
     let routes: BrowseRouteBatch
     var highlighted: BrowseRouteBatch = .empty
     var playing = false
-    var preferences = BrowseMapSettings.shared.value
-    @Environment(\.colorScheme) private var systemScheme
 
-    init(routes: BrowseRouteBatch, highlighted: BrowseRouteBatch = .empty, playing: Bool = false) {
-        self.routes = routes
-        self.highlighted = highlighted
-        self.playing = playing
+    var body: some MapContent {
+        lines(routes, highlighted: false)
+        lines(highlighted, highlighted: true)
     }
 
-    func makeUIView(context: Context) -> Probe {
-        let view = Probe()
-        view.isUserInteractionEnabled = false
-        return view
-    }
-
-    func updateUIView(_ view: Probe, context: Context) {
-        view.style = self
-        view.attach()
-    }
-
-    static func dismantleUIView(_ view: Probe, coordinator: ()) { view.detach() }
-
-    final class Probe: UIView, MKMapViewDelegate {
-        var style: BrowseMapRoutes?
-        private weak var map: MKMapView?
-        private weak var original: MKMapViewDelegate?
-        private var base: BrowseRouteBatch?
-        private var progress: BrowseRouteBatch?
-        private var applied: BrowseMapPreferences?
-        private var scheme: ColorScheme?
-        private var playing = false
-        private var strokes: [ObjectIdentifier: (dashed: Bool, highlighted: Bool)] = [:]
-
-        override func responds(to selector: Selector!) -> Bool {
-            super.responds(to: selector) || original?.responds(to: selector) == true
-        }
-
-        override func forwardingTarget(for selector: Selector!) -> Any? {
-            if original?.responds(to: selector) == true { return original }
-            return super.forwardingTarget(for: selector)
-        }
-
-        override func layoutSubviews() { super.layoutSubviews(); attach() }
-        override func didMoveToWindow() {
-            super.didMoveToWindow()
-            if window != nil {
-                DispatchQueue.main.async { [weak self] in self?.attach() }
-            } else { detach() }
-        }
-
-        func attach() {
-            guard window != nil, let style else { return }
-            // Remain within this map's immediate hosting hierarchy, even on
-            // screens containing multiple maps.
-            guard let target = map ?? RouteMapNativeGestureObserver.Coordinator.nearestMapView(to: self),
-                  let delegate = target.delegate else { return }
-            if delegate !== self {
-                guard !(delegate is Probe) else { return }
-                original = delegate
-                map = target
-                target.delegate = self
-            }
-            let effectiveScheme = style.preferences.scheme ?? style.systemScheme
-            let restyle = applied != style.preferences || scheme != effectiveScheme || playing != style.playing
-            applied = style.preferences
-            scheme = effectiveScheme
-            playing = style.playing
-            let replaceBase = base !== style.routes
-            let replaceProgress = replaceBase || progress !== style.highlighted
-            if replaceProgress { remove(progress, from: target); progress = nil }
-            if replaceBase {
-                remove(base, from: target)
-                base = style.routes
-                add(style.routes, highlighted: false, to: target)
-            }
-            if replaceProgress {
-                progress = style.highlighted
-                add(style.highlighted, highlighted: true, to: target)
-            }
-            if restyle {
-                for batch in [base, progress] {
-                    for line in batch?.lines ?? [] {
-                        if let renderer = target.renderer(for: line.polyline) as? BrowseRouteRenderer {
-                            configure(renderer)
-                        }
-                    }
+    @MapContentBuilder
+    private func lines(_ batch: BrowseRouteBatch, highlighted: Bool) -> some MapContent {
+        let prefs = BrowseMapSettings.shared.value
+        let ink = UIColor(prefs.color())
+        ForEach(batch.lines, id: \.polyline) { line in
+            let style = StrokeStyle(lineWidth: line.dashed ? 1.5 : (highlighted ? 4 : 3),
+                                    lineCap: .round, lineJoin: .round, dash: line.dashed ? [5, 5] : [])
+            ForEach(prefs.strokeLayers, id: \.self) { layer in
+                if let polyline = line.layerPolylines[layer] {
+                    let paint = prefs.routeStroke(
+                        style, ink: ink,
+                        baseAlpha: highlighted || playing ? 1 : (line.dashed ? 0.4 : 0.7),
+                        layer: layer,
+                        playbackOpacity: playing && !highlighted ? BrowseMapPreferences.untraveledOpacity(dashed: line.dashed) : 1
+                    )
+                    MapPolyline(polyline).stroke(Color(uiColor: paint.color), style: paint.style)
                 }
             }
-        }
-
-        private func add(_ batch: BrowseRouteBatch, highlighted: Bool, to map: MKMapView) {
-            for line in batch.lines {
-                strokes[ObjectIdentifier(line.polyline)] = (line.dashed, highlighted)
-                map.addOverlay(line.polyline, level: .aboveRoads)
-            }
-        }
-
-        private func remove(_ batch: BrowseRouteBatch?, from map: MKMapView) {
-            for line in batch?.lines ?? [] {
-                map.removeOverlay(line.polyline)
-                strokes.removeValue(forKey: ObjectIdentifier(line.polyline))
-            }
-        }
-
-        func detach() {
-            if let map {
-                remove(progress, from: map)
-                remove(base, from: map)
-                if map.delegate === self { map.delegate = original }
-            }
-            progress = nil
-            base = nil
-            map = nil
-            original = nil
-            applied = nil
-        }
-
-        private func configure(_ renderer: BrowseRouteRenderer) {
-            guard let line = strokes[ObjectIdentifier(renderer.polyline)], let applied else { return }
-            renderer.configureTransport(applied, traits: UITraitCollection(userInterfaceStyle: scheme == .dark ? .dark : .light),
-                                        dashed: line.dashed, playing: playing, highlighted: line.highlighted)
-        }
-
-        func mapView(_ mapView: MKMapView, rendererFor overlay: MKOverlay) -> MKOverlayRenderer {
-            if let line = overlay as? MKPolyline, strokes[ObjectIdentifier(line)] != nil {
-                let renderer = BrowseRouteRenderer(polyline: line)
-                configure(renderer)
-                return renderer
-            }
-            return original?.mapView?(mapView, rendererFor: overlay) ?? MKOverlayRenderer(overlay: overlay)
         }
     }
 }
@@ -619,21 +549,29 @@ struct MapStyleSettingsView: View {
         }
     }
 
+    /// A logarithmic slider centers a multiplier range such as 0.25×…4× on 1×.
     private func sliderRow(_ title: String, key: WritableKeyPath<BrowseMapPreferences, Double>,
-                           range: ClosedRange<Double>, step: Double, display: String) -> some View {
-        VStack {
+                           range: ClosedRange<Double>, step: Double, logarithmic: Bool = false,
+                           display: String) -> some View {
+        let position: (Double) -> Double = logarithmic ? { log2($0) } : { $0 }
+        let quantized: (Double) -> Double = { raw in
+            let linear = logarithmic ? pow(2, raw) : raw
+            return min(range.upperBound, max(range.lowerBound, (linear / step).rounded() * step))
+        }
+        return VStack {
             HStack {
                 Text(title)
                 Spacer()
                 Text(display).monospacedDigit().foregroundStyle(.secondary)
             }
             Slider(value: Binding(
-                get: { previewPreferences[keyPath: key] },
-                set: { value in
+                get: { position(previewPreferences[keyPath: key]) },
+                set: { raw in
+                    let value = quantized(raw)
                     if editingSlider == key { sliderValue = value }
                     else { settings.value[keyPath: key] = value }
                 }
-            ), in: range, step: step, onEditingChanged: { editing in
+            ), in: position(range.lowerBound)...position(range.upperBound), onEditingChanged: { editing in
                 if editing { editingSlider = key }
                 else { finishSliderEdit() }
             })
@@ -669,7 +607,7 @@ struct MapStyleSettingsView: View {
             Section("交通线样式") {
                 ColorPicker("颜色", selection: Binding(get: { settings.value.color() },
                                                       set: { settings.value.colorHex = $0.toHex() }), supportsOpacity: false)
-                sliderRow("宽度", key: \.width, range: BrowseMapPreferences.widthRange, step: 0.05,
+                sliderRow("宽度", key: \.width, range: BrowseMapPreferences.widthRange, step: 0.05, logarithmic: true,
                           display: "\(previewPreferences.width.formatted(.number.precision(.fractionLength(0...2))))×")
                 sliderRow("不透明度", key: \.opacity, range: BrowseMapPreferences.transparencyRange, step: 0.01,
                           display: previewPreferences.opacity.formatted(.percent))

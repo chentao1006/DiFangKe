@@ -8974,11 +8974,9 @@ struct TripDetailView: View {
             GeometryReader { detailViewport in
                 ZStack(alignment: .bottom) {
                 Map(position: $cameraPosition) {
+                    BrowseMapRoutes(routes: tripPlayback.frames.isEmpty ? mapModel.mapRoutes : tripPlayback.mapRoutes,
+                                    highlighted: tripPlaybackHighlightedRoutes, playing: !tripPlayback.frames.isEmpty)
                     tripMapContent
-        }
-        .background {
-            BrowseMapRoutes(routes: tripPlayback.frames.isEmpty ? mapModel.mapRoutes : tripPlayback.mapRoutes,
-                            highlighted: tripPlaybackHighlightedRoutes, playing: !tripPlayback.frames.isEmpty)
         }
         .browseMapStyle(
             elevation: tripPlayback.frames.isEmpty ? .realistic : .flat

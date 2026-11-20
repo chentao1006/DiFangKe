@@ -2220,6 +2220,9 @@ struct DFKMapView: View {
                                     }
                                 }
 
+                                BrowseMapRoutes(routes: usesReviewTransportOverview ? reviewRoutes : mapContent.mapRoutes,
+                                                highlighted: playbackOverlay?.highlightedRoutes ?? .empty,
+                                                playing: playbackOverlay != nil)
                                 transportMapContent()
                                 playbackMapContent()
 
@@ -2284,11 +2287,6 @@ struct DFKMapView: View {
                                             onTouchChanged: onMapTouchChanged
                                         )
                                     }
-                                }
-                                .background {
-                                    BrowseMapRoutes(routes: usesReviewTransportOverview ? reviewRoutes : mapContent.mapRoutes,
-                                                    highlighted: playbackOverlay?.highlightedRoutes ?? .empty,
-                                                    playing: playbackOverlay != nil)
                                 }
                                 .browseMapStyle(
                                     elevation: playbackOverlay == nil ? .automatic : .flat

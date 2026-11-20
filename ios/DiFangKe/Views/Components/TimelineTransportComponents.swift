@@ -1987,7 +1987,17 @@ struct TransportModalView: View {
                                 }
                             }
 
-                            if let frame = currentRouteAnimationFrame {
+                            // While the camera is following, draw the vehicle as a
+                            // screen-centered overlay below. A map annotation and
+                            // the camera are committed by MapKit on different render
+                            // passes, which otherwise makes the vehicle visibly
+                            // oscillate around the center. During a user gesture the
+                            // real annotation returns so it remains attached to the
+                            // route while the camera is freely manipulated.
+                            if let frame = currentRouteAnimationFrame,
+                               !followsRouteAnimation ||
+                               isManipulatingRouteMap ||
+                               routeMapNeedsRecenterAfterInteraction {
                                 Annotation("", coordinate: frame.coordinate) {
                                     animatedTransportIcon(
                                         travelsWest: frame.travelsWest,
@@ -1996,9 +2006,22 @@ struct TransportModalView: View {
                                     .mapAnnotationLayer(MapAnnotationLayer.animatedTransport)
                                 }
                             }
-                            
+
                             }
                             .browseMapStyle(elevation: .automatic, pointsOfInterest: .excludingAll)
+                            .overlay {
+                                if followsRouteAnimation,
+                                   !isManipulatingRouteMap,
+                                   !routeMapNeedsRecenterAfterInteraction,
+                                   let frame = currentRouteAnimationFrame {
+                                    animatedTransportIcon(
+                                        travelsWest: frame.travelsWest,
+                                        timeText: frame.timeText
+                                    )
+                                    .allowsHitTesting(false)
+                                    .accessibilityHidden(true)
+                                }
+                            }
                             .background {
                                 RouteMapNativeGestureObserver(
                                     onInteractionChanged: { kind, isActive in
