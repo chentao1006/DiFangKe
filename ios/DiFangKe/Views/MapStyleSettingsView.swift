@@ -52,7 +52,7 @@ struct BrowseMapPreferences: Equatable {
     }
 
     var cacheKey: String {
-        "\(theme.rawValue)|\(appearance.rawValue)|\(places.rawValue)|\(width)|\(transparency)|\(colorHex)|\(outline)-\(glow)-stroke-v5"
+        "\(theme.rawValue)|\(appearance.rawValue)|\(places.rawValue)|\(width)|\(transparency)|\(colorHex)|\(outline)-\(glow)-stroke-v6"
     }
 
     var supportsAppearance: Bool { theme != .satellite && theme != .hybrid }
@@ -141,37 +141,50 @@ struct BrowseMapPreferences: Equatable {
         return layers
     }
 
+    func strokeWidth(_ width: CGFloat, dashed: Bool, layer: StrokeLayer) -> CGFloat {
+        let border = min(2, width * 0.5) * (dashed ? 0.5 : 1)
+        switch layer {
+        case .route: return width
+        case .border: return width + border
+        case .innerGlow, .outerGlow:
+            let halo = min(3.5, width)
+            return width + (outline ? border : 0) + (layer == .outerGlow ? halo : halo / 2)
+        }
+    }
+
     func routeStroke(_ base: StrokeStyle, ink: UIColor, baseAlpha: Double,
                      layer: StrokeLayer, playbackOpacity: Double = 1) -> (style: StrokeStyle, color: UIColor) {
         let width = lineWidth(base.lineWidth)
-        let borderWidth: CGFloat = 4 // Two points outside each side of the route.
         var style = base
+        style.lineWidth = strokeWidth(width, dashed: !base.dash.isEmpty, layer: layer)
         let opacity = alpha(baseAlpha) * playbackOpacity
         let tint: UIColor
         var red: CGFloat = 0, green: CGFloat = 0, blue: CGFloat = 0, componentAlpha: CGFloat = 0
         ink.getRed(&red, green: &green, blue: &blue, alpha: &componentAlpha)
         switch layer {
         case .route:
-            style.lineWidth = width
             tint = ink.withAlphaComponent(opacity)
         case .border:
-            style.lineWidth = width + borderWidth
             tint = UIColor { $0.userInterfaceStyle == .dark ? .black : .white }.withAlphaComponent(opacity)
         case .outerGlow, .innerGlow:
             let outer = layer == .outerGlow
-            style.lineWidth = width + (outline ? borderWidth : 0) + (outer ? 7 : 3.5)
             tint = UIColor(red: 0.3 + 0.7 * red, green: 0.3 + 0.7 * green,
                            blue: 0.3 + 0.7 * blue, alpha: opacity * (outer ? 0.15 : 0.32))
         }
         if !base.dash.isEmpty {
-            let gapAllowance = (outline ? borderWidth : 0) + (glow ? 7 : 0)
-            style.dash = base.dash.map { $0 * max(1, self.width) + gapAllowance }
+            // Round caps extend into the gap by one full stroke width in total.
+            let outsideWidth = strokeWidth(width, dashed: !base.dash.isEmpty, layer: glow ? .outerGlow : (outline ? .border : .route))
+            style.dash = base.dash.enumerated().map { index, length in
+                let compactLength = length * 0.6
+                return index.isMultiple(of: 2) ? compactLength : outsideWidth + compactLength
+            }
         }
         return (style, tint)
     }
 
     func draw(_ path: UIBezierPath, baseWidth: CGFloat, dash: [CGFloat], baseAlpha: Double,
-              baseColor: UIColor, scale: CGFloat = 1, playbackOpacity: Double = 1) {
+              baseColor: UIColor, scale: CGFloat = 1, playbackOpacity: Double = 1,
+              borderGeometry: ((CGFloat, CGFloat, [CGFloat]) -> CGPath)? = nil) {
         let ink = colorHex.isEmpty ? baseColor : UIColor(color())
         let base = StrokeStyle(lineWidth: baseWidth, dash: dash)
         path.lineCapStyle = .round
@@ -184,11 +197,10 @@ struct BrowseMapPreferences: Equatable {
             stroke.color.setStroke()
             if layer == .border {
                 // Keep the center transparent, including around each individual dash cap.
-                let centerline = lengths.isEmpty ? path.cgPath : path.cgPath.copy(dashingWithPhase: 0, lengths: lengths)
-                let ring = CGMutablePath()
-                for width in [stroke.style.lineWidth, lineWidth(baseWidth)] {
-                    ring.addPath(centerline.copy(strokingWithWidth: width * scale, lineCap: .round, lineJoin: .round, miterLimit: 10))
-                }
+                let outer = stroke.style.lineWidth * scale
+                let inner = lineWidth(baseWidth) * scale
+                let ring = borderGeometry?(outer, inner, lengths)
+                    ?? Self.borderPath(path.cgPath, outer: outer, inner: inner, dash: lengths)
                 let border = UIBezierPath(cgPath: ring)
                 border.usesEvenOddFillRule = true
                 stroke.color.setFill()
@@ -197,6 +209,15 @@ struct BrowseMapPreferences: Equatable {
                 path.stroke()
             }
         }
+    }
+
+    fileprivate static func borderPath(_ path: CGPath, outer: CGFloat, inner: CGFloat, dash: [CGFloat]) -> CGPath {
+        let centerline = dash.isEmpty ? path : path.copy(dashingWithPhase: 0, lengths: dash)
+        let ring = CGMutablePath()
+        for width in [outer, inner] {
+            ring.addPath(centerline.copy(strokingWithWidth: width, lineCap: .round, lineJoin: .round, miterLimit: 10))
+        }
+        return ring
     }
 
 }
@@ -214,11 +235,32 @@ final class BrowseRouteRenderer: MKPolylineRenderer {
 
     private let paint = OSAllocatedUnfairLock(initialState: Paint())
 
+    // Adjacent tiles use the same outline in renderer coordinates. Retain only the current scale.
+    private struct BorderGeometry {
+        let source: CGPath
+        let outer: CGFloat
+        let inner: CGFloat
+        let dash: [CGFloat]
+        let path: CGPath
+    }
+
+    private let borderCache = OSAllocatedUnfairLock<BorderGeometry?>(initialState: nil)
+
+    private func borderPath(for source: CGPath, outer: CGFloat, inner: CGFloat, dash: [CGFloat]) -> CGPath {
+        if let cached = borderCache.withLock({ $0 }), cached.source === source,
+           cached.outer == outer, cached.inner == inner, cached.dash == dash {
+            return cached.path
+        }
+        let path = BrowseMapPreferences.borderPath(source, outer: outer, inner: inner, dash: dash)
+        borderCache.withLock { $0 = BorderGeometry(source: source, outer: outer, inner: inner, dash: dash, path: path) }
+        return path
+    }
+
     func configure(_ preferences: BrowseMapPreferences, traits: UITraitCollection, width: CGFloat,
                    dash: [CGFloat], alpha: Double, playbackOpacity: Double = 1) {
         paint.withLock { $0 = Paint(preferences: preferences, traits: traits, width: width, dash: dash, playbackOpacity: playbackOpacity, alpha: alpha) }
         shouldRasterize = true
-        lineWidth = preferences.lineWidth(width) + (preferences.outline ? 4 : 0) + (preferences.glow ? 7 : 0)
+        lineWidth = preferences.strokeWidth(preferences.lineWidth(width), dashed: !dash.isEmpty, layer: preferences.strokeLayers[0])
         setNeedsDisplay()
     }
 
@@ -239,7 +281,9 @@ final class BrowseRouteRenderer: MKPolylineRenderer {
             style.preferences.draw(UIBezierPath(cgPath: path), baseWidth: style.width, dash: style.dash,
                                    baseAlpha: style.alpha, baseColor: UIColor(Color.dfkAccent),
                                    // Widths are in screen points, matching `MapPolyline` strokes.
-                                   scale: contentScaleFactor / zoomScale, playbackOpacity: style.playbackOpacity)
+                                   scale: contentScaleFactor / zoomScale, playbackOpacity: style.playbackOpacity) { outer, inner, dash in
+                self.borderPath(for: path, outer: outer, inner: inner, dash: dash)
+            }
         }
     }
 }
@@ -250,37 +294,21 @@ final class BrowseRouteBatch: @unchecked Sendable {
     struct Line {
         let polyline: MKPolyline
         let dashed: Bool
-        /// MapKit draws an overlay object once, so every stroke layer needs its
-        /// own polyline. Copies are cached per source polyline to keep identity
-        /// stable when the same geometry is published again.
         let layerPolylines: [BrowseMapPreferences.StrokeLayer: MKPolyline]
 
-        init(polyline: MKPolyline, dashed: Bool) {
+        init(polyline: MKPolyline, dashed: Bool,
+             layers: [BrowseMapPreferences.StrokeLayer] = [.outerGlow, .innerGlow, .border, .route]) {
             self.polyline = polyline
             self.dashed = dashed
-            layerPolylines = BrowseRouteBatch.layerPolylines(for: polyline)
-        }
-    }
-    let lines: [Line]
-
-    private static let layerCache = OSAllocatedUnfairLock(
-        uncheckedState: NSMapTable<MKPolyline, NSDictionary>.weakToStrongObjects()
-    )
-
-    private static func layerPolylines(for polyline: MKPolyline) -> [BrowseMapPreferences.StrokeLayer: MKPolyline] {
-        let layers: [BrowseMapPreferences.StrokeLayer] = [.outerGlow, .innerGlow, .border, .route]
-        return layerCache.withLockUnchecked { cache in
-            if let cached = cache.object(forKey: polyline) as? [BrowseMapPreferences.StrokeLayer: MKPolyline] {
-                return cached
-            }
             var copies: [BrowseMapPreferences.StrokeLayer: MKPolyline] = [.route: polyline]
             for layer in layers where layer != .route {
                 copies[layer] = MKPolyline(points: polyline.points(), count: polyline.pointCount)
             }
-            cache.setObject(copies as NSDictionary, forKey: polyline)
-            return copies
+            layerPolylines = copies
         }
     }
+    let lines: [Line]
+
     static let empty = BrowseRouteBatch(lines: [])
 
     init(lines: [Line]) { self.lines = lines }
@@ -312,21 +340,25 @@ struct BrowseMapRoutes: MapContent {
     private func lines(_ batch: BrowseRouteBatch, highlighted: Bool) -> some MapContent {
         let prefs = BrowseMapSettings.shared.value
         let ink = UIColor(prefs.color())
-        ForEach(batch.lines, id: \.polyline) { line in
-            let style = StrokeStyle(lineWidth: line.dashed ? 1.5 : (highlighted ? 4 : 3),
-                                    lineCap: .round, lineJoin: .round, dash: line.dashed ? [5, 5] : [])
-            ForEach(prefs.strokeLayers, id: \.self) { layer in
+        ForEach(prefs.strokeLayers, id: \.self) { layer in
+            let solid = paint(dashed: false, highlighted: highlighted, layer: layer, prefs: prefs, ink: ink)
+            let dashed = paint(dashed: true, highlighted: highlighted, layer: layer, prefs: prefs, ink: ink)
+            ForEach(batch.lines, id: \.polyline) { line in
                 if let polyline = line.layerPolylines[layer] {
-                    let paint = prefs.routeStroke(
-                        style, ink: ink,
-                        baseAlpha: highlighted || playing ? 1 : (line.dashed ? 0.4 : 0.7),
-                        layer: layer,
-                        playbackOpacity: playing && !highlighted ? BrowseMapPreferences.untraveledOpacity(dashed: line.dashed) : 1
-                    )
-                    MapPolyline(polyline).stroke(Color(uiColor: paint.color), style: paint.style)
+                    let stroke = line.dashed ? dashed : solid
+                    MapPolyline(polyline).stroke(Color(uiColor: stroke.color), style: stroke.style)
                 }
             }
         }
+    }
+
+    private func paint(dashed: Bool, highlighted: Bool, layer: BrowseMapPreferences.StrokeLayer,
+                       prefs: BrowseMapPreferences, ink: UIColor) -> (style: StrokeStyle, color: UIColor) {
+        let style = StrokeStyle(lineWidth: dashed ? 1.5 : (highlighted ? 4 : 3),
+                                lineCap: .round, lineJoin: .round, dash: dashed ? [5, 5] : [])
+        return prefs.routeStroke(style, ink: ink, baseAlpha: highlighted || playing ? 1 : (dashed ? 0.4 : 0.7),
+                                 layer: layer, playbackOpacity: playing && !highlighted
+                                     ? BrowseMapPreferences.untraveledOpacity(dashed: dashed) : 1)
     }
 }
 

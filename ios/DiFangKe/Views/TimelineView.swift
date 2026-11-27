@@ -498,7 +498,13 @@ struct TimelineScene<Content: View>: View {
                     guard isActive else { return }
                     withTransaction(transaction) { cameraPosition = position }
                 }
-            ),
+            ).onUserMapMove {
+                guard isActive, dayPlaybackDate != nil, followsDayPlayback else { return }
+                handleDayPlaybackMapTouch(true)
+                followsDayPlayback = false
+                isTouchingDayPlaybackMap = false
+                completeDayPlaybackRecenter()
+            },
             isInteractive: true,
             showsUserLocation: selectedFootprint == nil && dayPlaybackDate == nil,
             points: mapPoints,

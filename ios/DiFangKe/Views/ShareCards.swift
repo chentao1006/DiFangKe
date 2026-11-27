@@ -187,8 +187,9 @@ struct DFKShareCardPayload: Identifiable {
     var reviewMemories: [DFKShareReviewMemory] = []
     var summary: String?
     var isLoading: Bool = false
-    var brandName: String = "地方客"
-    var brandSlogan: String = "走过的地方，就是你的生活"
+    static let defaultBrandName = "地方客"
+    var brandName = Self.defaultBrandName
+    var brandSlogan = AppConfig.shared.randomShareBrandSlogan()
 }
 
 /// The footprint fields share payloads and templates read, copied once on the

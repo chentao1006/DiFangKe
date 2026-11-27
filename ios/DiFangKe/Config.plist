@@ -2,6 +2,15 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+	<key>SHARE_BRAND_SLOGANS</key>
+	<array>
+		<string>走过的地方，就是你的生活</string>
+		<string>把走过的路，留给以后的自己</string>
+		<string>沿着足迹，想起那一天</string>
+		<string>地图上这一站，曾是我的日常</string>
+		<string>有些路，回头看才知道走了多远</string>
+		<string>熟悉的街角，也值得记下</string>
+	</array>
 	<!-- AI 服务相关配置 (私密信息请在 Secrets.plist 中配置) -->
 	<key>SERVICE_SECRET</key>
 	<string></string>
@@ -628,6 +637,9 @@
 
     <!-- 回顾页“值得记住”候选：长停留（秒）/照片数/首次到访照片数/
          高频到访次数/异常停留倍数/最低综合分/最大卡片数/轮播秒数/单日远行距离（米） -->
+    <!-- 足迹页首次展示往年今日横幅前的等待时间（秒） -->
+    <key>PAST_MEMORY_BANNER_DELAY_SECONDS</key>
+    <real>8</real>
     <key>REVIEW_MEMORY_LONG_STAY_MIN_DURATION</key>
     <real>10800</real>
     <key>REVIEW_MEMORY_PHOTO_MIN_COUNT</key>
@@ -640,8 +652,15 @@
     <real>2</real>
     <key>REVIEW_MEMORY_MINIMUM_SCORE</key>
     <real>3</real>
+    <!-- 奔波日：当天开始的最少路程段数，以及当天累计停留上限（秒） -->
+    <key>REVIEW_MEMORY_BUSY_DAY_MIN_LEGS</key>
+    <integer>4</integer>
+    <key>REVIEW_MEMORY_BUSY_DAY_MAX_STAY_SECONDS</key>
+    <real>3600</real>
+    <key>REVIEW_MEMORY_DAILY_VARIETY_MIN_COUNT</key>
+    <integer>2</integer>
     <key>REVIEW_MEMORY_MAXIMUM_COUNT</key>
-    <integer>6</integer>
+    <integer>10</integer>
     <key>REVIEW_MEMORY_CAROUSEL_INTERVAL</key>
     <real>6</real>
     <key>REVIEW_MEMORY_CAROUSEL_ANIMATION_DURATION</key>

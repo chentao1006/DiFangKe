@@ -10,10 +10,13 @@ private struct DFKTransportIconPoint: Identifiable {
     let travelsWest: Bool
 }
 
-private struct DFKReviewTransportLine: Identifiable {
-    let id: String
-    let polyline: MKPolyline
-    let isDashed: Bool
+private extension MKCoordinateRegion {
+    func contains(_ bounds: DFKCoordinateBounds) -> Bool {
+        bounds.minLatitude >= center.latitude - span.latitudeDelta / 2 &&
+        bounds.maxLatitude <= center.latitude + span.latitudeDelta / 2 &&
+        bounds.minLongitude >= center.longitude - span.longitudeDelta / 2 &&
+        bounds.maxLongitude <= center.longitude + span.longitudeDelta / 2
+    }
 }
 
 /// Review-map transport data, exactly as the review map has always drawn it,
@@ -38,27 +41,33 @@ private struct DFKReviewTransportGeometry {
         let bounds: DFKCoordinateBounds
     }
 
-    struct PreparedRoute {
-        let source: Route
-        let line: DFKReviewTransportLine
+    struct CellEdge: Hashable {
+        let fromX: Int, fromY: Int, toX: Int, toY: Int
+        let isDashed: Bool
     }
 
-    /// Retain only the current scale. Panning reuses the same MapKit objects
-    /// without keeping a copy of the year's routes at every visited scale.
+    struct PreparedRoute {
+        let line: BrowseRouteBatch.Line
+        let edges: Set<CellEdge>
+    }
+
     final class ScaleCache: @unchecked Sendable {
         private let lock = NSLock()
+        private var layers: [BrowseMapPreferences.StrokeLayer] = []
         private var cell: Double?
-        private var routes: [PreparedRoute] = []
+        private var routes: [Int: PreparedRoute] = [:]
 
-        func value(for cell: Double) -> [PreparedRoute]? {
+        func value(for cell: Double, layers: [BrowseMapPreferences.StrokeLayer]) -> [Int: PreparedRoute] {
             lock.lock()
             defer { lock.unlock() }
-            return self.cell == cell ? routes : nil
+            return self.cell == cell && self.layers == layers ? routes : [:]
         }
 
-        func store(_ routes: [PreparedRoute], cell: Double) {
+        func store(_ routes: [Int: PreparedRoute], cell: Double, layers: [BrowseMapPreferences.StrokeLayer]) {
             lock.lock()
             defer { lock.unlock() }
+            guard !Task.isCancelled else { return }
+            self.layers = layers
             self.cell = cell
             self.routes = routes
         }
@@ -73,7 +82,16 @@ private struct DFKReviewTransportGeometry {
 
     static func build(key: String, transports: [DFKMapTransportDisplay]) -> DFKReviewTransportGeometry {
         var geometry = DFKReviewTransportGeometry(key: key)
-        var seen: Set<String> = []
+        struct Shape: Hashable {
+            let samples: [Int64]
+            let dashed: Bool
+        }
+        func sample(_ point: CLLocationCoordinate2D) -> Int64 {
+            let latitude = Int64((point.latitude * 1000).rounded())
+            let longitude = Int32((point.longitude * 1000).rounded())
+            return (latitude << 32) | Int64(UInt32(bitPattern: longitude))
+        }
+        var seen: Set<Shape> = []
         for display in transports {
             guard !Task.isCancelled else { return geometry }
             let transport = display.transport
@@ -92,25 +110,18 @@ private struct DFKReviewTransportGeometry {
                 ))
             }
             for segment in segments {
-                let coordinates = TransportRouteProgressGeometry.renderableCoordinates(segment.coordinates)
-                guard coordinates.count >= 2 else { continue }
+                // Display segments have already been validated and deduplicated.
+                let coordinates = segment.coordinates
                 let step = max(1, coordinates.count / 24)
-                var sampled = stride(from: 0, to: coordinates.count, by: step).map { coordinates[$0] }
-                if let last = coordinates.last,
-                   sampled.last?.latitude != last.latitude || sampled.last?.longitude != last.longitude {
-                    sampled.append(last)
-                }
-                let forward = sampled.map { String(format: "%.3f,%.3f", $0.latitude, $0.longitude) }.joined(separator: ";")
-                let reverse = sampled.reversed().map { String(format: "%.3f,%.3f", $0.latitude, $0.longitude) }.joined(separator: ";")
-                guard seen.insert("\(segment.isDashed ? "d" : "s"):\(min(forward, reverse))").inserted else { continue }
-                let latitudes = coordinates.map(\.latitude)
-                let longitudes = coordinates.map(\.longitude)
+                var sampled = stride(from: 0, to: coordinates.count, by: step).map { sample(coordinates[$0]) }
+                if (coordinates.count - 1) % step != 0 { sampled.append(sample(coordinates[coordinates.count - 1])) }
+                if sampled.reversed().lexicographicallyPrecedes(sampled) { sampled.reverse() }
+                guard seen.insert(Shape(samples: sampled, dashed: segment.isDashed)).inserted else { continue }
+                var bounds = DFKCoordinateBounds()
+                bounds.add(contentsOf: coordinates)
                 geometry.routes.append(.init(
-                    segment: TransportLineSegment(id: segment.id, coordinates: coordinates, isDashed: segment.isDashed),
-                    minLatitude: latitudes.min() ?? 0,
-                    maxLatitude: latitudes.max() ?? 0,
-                    minLongitude: longitudes.min() ?? 0,
-                    maxLongitude: longitudes.max() ?? 0
+                    segment: segment, minLatitude: bounds.minLatitude, maxLatitude: bounds.maxLatitude,
+                    minLongitude: bounds.minLongitude, maxLongitude: bounds.maxLongitude
                 ))
             }
         }
@@ -137,72 +148,76 @@ private struct DFKReviewTransportGeometry {
     }
 
     /// Prepare continuous routes once per scale, then only cull on a pan.
-    func visibleSegments(in region: MKCoordinateRegion, baseCell: Double) -> [DFKReviewTransportLine] {
+    func visibleSegments(in region: MKCoordinateRegion, baseCell: Double, layers: [BrowseMapPreferences.StrokeLayer]) -> [BrowseRouteBatch.Line] {
         let bounds = Self.paddedBounds(region)
         let adaptiveCell = max(baseCell, max(region.span.latitudeDelta, region.span.longitudeDelta) / 110)
         let level = adaptiveCell > baseCell ? Int(ceil(log(adaptiveCell / baseCell) / log(1.6))) : 0
         let cell = baseCell * pow(1.6, Double(level))
-        let prepared: [PreparedRoute]
-        if let cached = scaleCache.value(for: cell) {
-            prepared = cached
-        } else {
-            prepared = prepareRoutes(cell: cell)
+        var cached = scaleCache.value(for: cell, layers: layers)
+        var lines: [BrowseRouteBatch.Line] = []
+        var drawnEdges: Set<CellEdge> = []
+        for (index, route) in routes.enumerated() {
             guard !Task.isCancelled else { return [] }
-            scaleCache.store(prepared, cell: cell)
+            guard route.maxLatitude >= bounds.minLatitude, route.minLatitude <= bounds.maxLatitude,
+                  route.maxLongitude >= bounds.minLongitude, route.minLongitude <= bounds.maxLongitude else { continue }
+            // Reject a repeated sub-cell trip before scanning its points or allocating overlays.
+            let x = Int((route.minLongitude / cell).rounded())
+            let y = Int((route.minLatitude / cell).rounded())
+            if x == Int((route.maxLongitude / cell).rounded()),
+               y == Int((route.maxLatitude / cell).rounded()),
+               drawnEdges.contains(CellEdge(fromX: x, fromY: y, toX: x, toY: y, isDashed: route.segment.isDashed)) {
+                continue
+            }
+            let prepared: PreparedRoute
+            if let existing = cached[index] {
+                prepared = existing
+            } else {
+                prepared = prepare(route, cell: cell, layers: layers)
+                cached[index] = prepared
+            }
+            guard !prepared.edges.isSubset(of: drawnEdges) else { continue }
+            drawnEdges.formUnion(prepared.edges)
+            lines.append(prepared.line)
         }
-        return prepared.compactMap { route in
-            let source = route.source
-            guard source.maxLatitude >= bounds.minLatitude && source.minLatitude <= bounds.maxLatitude &&
-                    source.maxLongitude >= bounds.minLongitude && source.minLongitude <= bounds.maxLongitude else { return nil }
-            return route.line
-        }
+        scaleCache.store(cached, cell: cell, layers: layers)
+        return lines
     }
 
-    private func prepareRoutes(cell: Double) -> [PreparedRoute] {
-        struct CellEdge: Hashable {
-            let fromX: Int, fromY: Int, toX: Int, toY: Int
-            let isDashed: Bool
-        }
+    private func prepare(_ route: Route, cell: Double, layers: [BrowseMapPreferences.StrokeLayer]) -> PreparedRoute {
         func gridCell(_ coordinate: CLLocationCoordinate2D) -> (x: Int, y: Int) {
             (Int((coordinate.longitude / cell).rounded()), Int((coordinate.latitude / cell).rounded()))
         }
 
-        var result: [PreparedRoute] = []
-        var drawnEdges: Set<CellEdge> = []
-        for route in routes {
-            guard !Task.isCancelled else { return [] }
-            let coordinates = route.segment.coordinates
-            var thinned: [CLLocationCoordinate2D] = [coordinates[0]]
-            var lastCell = gridCell(coordinates[0])
-            var edges: Set<CellEdge> = []
-            for (index, coordinate) in coordinates.enumerated().dropFirst() {
-                let pointCell = gridCell(coordinate)
-                let isLast = index == coordinates.count - 1
-                guard pointCell != lastCell || isLast else { continue }
-                thinned.append(coordinate)
-                if pointCell != lastCell {
-                    let a = lastCell, b = pointCell
-                    edges.insert((a.x, a.y) <= (b.x, b.y)
-                        ? CellEdge(fromX: a.x, fromY: a.y, toX: b.x, toY: b.y, isDashed: route.segment.isDashed)
-                        : CellEdge(fromX: b.x, fromY: b.y, toX: a.x, toY: a.y, isDashed: route.segment.isDashed))
-                }
-                lastCell = pointCell
+        let coordinates = route.segment.coordinates
+        var thinned: [CLLocationCoordinate2D] = [coordinates[0]]
+        var lastCell = gridCell(coordinates[0])
+        var edges: Set<CellEdge> = []
+        for (index, coordinate) in coordinates.enumerated().dropFirst() {
+            let pointCell = gridCell(coordinate)
+            let isLast = index == coordinates.count - 1
+            guard pointCell != lastCell || isLast else { continue }
+            thinned.append(coordinate)
+            if pointCell != lastCell {
+                let a = lastCell, b = pointCell
+                edges.insert((a.x, a.y) <= (b.x, b.y)
+                    ? CellEdge(fromX: a.x, fromY: a.y, toX: b.x, toY: b.y, isDashed: route.segment.isDashed)
+                    : CellEdge(fromX: b.x, fromY: b.y, toX: a.x, toY: a.y, isDashed: route.segment.isDashed))
             }
-            // Omit only a route whose entire shape is already represented.
-            // Any new edge keeps the WHOLE route, including shared edges, so
-            // intersections and overlaps never cut it into disconnected runs.
-            guard edges.isEmpty || !edges.isSubset(of: drawnEdges) else { continue }
-            drawnEdges.formUnion(edges)
-            result.append(PreparedRoute(
-                source: route,
-                line: DFKReviewTransportLine(
-                    id: route.segment.id,
-                    polyline: MKPolyline(coordinates: thinned, count: thinned.count),
-                    isDashed: route.segment.isDashed
-                )
-            ))
+            lastCell = pointCell
         }
-        return result
+        // At overview scales many distinct trips fit entirely in one cell.
+        // Give these the same scale-local deduplication as longer paths.
+        if edges.isEmpty {
+            edges.insert(CellEdge(fromX: lastCell.x, fromY: lastCell.y, toX: lastCell.x,
+                                  toY: lastCell.y, isDashed: route.segment.isDashed))
+        }
+        return PreparedRoute(
+            line: BrowseRouteBatch.Line(
+                polyline: MKPolyline(coordinates: thinned, count: thinned.count),
+                dashed: route.segment.isDashed, layers: layers
+            ),
+            edges: edges
+        )
     }
 
     /// Longest routes claim nearby same-type icon positions first, using
@@ -218,10 +233,12 @@ private struct DFKReviewTransportGeometry {
             if culls {
                 guard midpoint.bounds.maxLatitude >= bounds.minLatitude && midpoint.bounds.minLatitude <= bounds.maxLatitude &&
                         midpoint.bounds.maxLongitude >= bounds.minLongitude && midpoint.bounds.minLongitude <= bounds.maxLongitude else { continue }
-                guard let visible = midpoint.coordinates.visibleDistanceMidpoint(in: region),
-                      visible.latitude >= bounds.minLatitude, visible.latitude <= bounds.maxLatitude,
-                      visible.longitude >= bounds.minLongitude, visible.longitude <= bounds.maxLongitude else { continue }
-                coordinate = visible
+                if region.contains(midpoint.bounds) {
+                    coordinate = midpoint.coordinate
+                } else {
+                    guard let visible = midpoint.coordinates.visibleDistanceMidpoint(in: region) else { continue }
+                    coordinate = visible
+                }
             } else {
                 coordinate = midpoint.coordinate
             }
@@ -549,7 +566,9 @@ private enum DFKMapContentBuilder {
             return display(for: transport)
         }
         content.transportSegments = content.transports.flatMap(\.segments)
-        content.mapRoutes = BrowseRouteBatch(content.transportSegments, coordinates: \.coordinates, dashed: \.isDashed)
+        if !request.usesReviewTransportOverview {
+            content.mapRoutes = BrowseRouteBatch(content.transportSegments, coordinates: \.coordinates, dashed: \.isDashed)
+        }
         content.annotationTransports = content.transports
 
         for (index, place) in request.places.enumerated() where place.isUserDefined {
@@ -1484,7 +1503,18 @@ struct DFKMapPlaybackMarker: View {
     }
 }
 
+@Observable
+final class PastMemoryBannerPresentation {
+    var shownOn: Date?
+    var collapsedOn: Date?
+}
+
+extension EnvironmentValues {
+    @Entry var pastMemoryPresentation: PastMemoryBannerPresentation? = nil
+}
+
 struct DFKMapView: View {
+    @Environment(\.pastMemoryPresentation) private var pastMemoryPresentation
     @Binding var cameraPosition: MapCameraPosition
     var isInteractive: Bool = false
     var rendersLiveMap: Bool = true
@@ -1730,7 +1760,8 @@ struct DFKMapView: View {
 
     private var reviewTransportVisibleKey: String {
         guard let region = transportVisibleRegion ?? placeClusterRegion else { return "\(reviewTransportGeometry.key ?? "")#none" }
-        return String(
+        let prefs = BrowseMapSettings.shared.value
+        return "\(prefs.outline)#\(prefs.glow)#" + String(
             format: "%@#%.5f,%.5f,%.5f,%.5f#%.0f",
             reviewTransportGeometry.key ?? "",
             region.center.latitude, region.center.longitude, region.span.latitudeDelta, region.span.longitudeDelta,
@@ -1763,24 +1794,31 @@ struct DFKMapView: View {
               reviewTransportGeometry.key != nil,
               let region = transportVisibleRegion ?? placeClusterRegion else { return }
         let geometry = reviewTransportGeometry
+        let layers = BrowseMapSettings.shared.value.strokeLayers
         let baseCell = AppConfig.shared.reviewMapTrajectoryBaseCellDegrees
+        let previous = reviewRoutes
+        let lineTask = Task.detached(priority: .userInitiated) {
+            let lines = geometry.visibleSegments(in: region, baseCell: baseCell, layers: layers)
+            guard !lines.elementsEqual(previous.lines, by: { $0.polyline === $1.polyline }) else { return previous }
+            return BrowseRouteBatch(lines: lines)
+        }
         let culls = isInteractive && transportVisibleRegion != nil
         let viewWidth = isInteractive ? transportMapWidth : 0
         let diameter = transportIconSize
-        let task = Task.detached(priority: .userInitiated) {
-            (
-                segments: BrowseRouteBatch(lines: geometry.visibleSegments(in: region, baseCell: baseCell).map { .init(polyline: $0.polyline, dashed: $0.isDashed) }),
-                icons: geometry.iconPoints(in: region, culls: culls, viewWidth: viewWidth, diameter: diameter)
-            )
+        let iconTask = Task.detached(priority: .userInitiated) {
+            geometry.iconPoints(in: region, culls: culls, viewWidth: viewWidth, diameter: diameter)
         }
-        let result = await withTaskCancellationHandler {
-            await task.value
+        await withTaskCancellationHandler {
+            let lines = await lineTask.value
+            guard !Task.isCancelled, geometry.key == reviewTransportGeometry.key else { return }
+            if lines !== previous { reviewRoutes = lines }
+            let icons = await iconTask.value
+            guard !Task.isCancelled, geometry.key == reviewTransportGeometry.key else { return }
+            reviewTransportIcons = icons
         } onCancel: {
-            task.cancel()
+            lineTask.cancel()
+            iconTask.cancel()
         }
-        guard !Task.isCancelled, geometry.key == reviewTransportGeometry.key else { return }
-        reviewRoutes = result.segments
-        reviewTransportIcons = result.icons
     }
 
     private var renderedTransportAnnotationItems: [DFKMapTransportDisplay] {
@@ -2342,6 +2380,23 @@ struct DFKMapView: View {
                                     }
                                 }
                                 .safeAreaPadding(.top, currentTopSafeAreaInset)
+                                .overlay(alignment: .topLeading) {
+                                    if showsMapControls, let presentation = pastMemoryPresentation,
+                                       let day = presentation.collapsedOn, Calendar.current.isDateInToday(day) {
+                                        Button {
+                                            withAnimation(.easeOut) { presentation.collapsedOn = nil }
+                                        } label: {
+                                            Image(systemName: "clock.arrow.trianglehead.counterclockwise.rotate.90")
+                                                .frame(width: 44, height: 44)
+                                                .contentShape(Circle())
+                                        }
+                                        .buttonStyle(.plain)
+                                        .dfkDetailMaterial(in: Circle())
+                                        .accessibilityLabel("展开往年今日")
+                                        .padding(.leading, 16)
+                                        .padding(.top, currentTopSafeAreaInset + 16)
+                                    }
+                                }
                                 .overlay(alignment: .topTrailing) {
                                     if showsMapControls, let onResetCamera {
                                         Button(action: onResetCamera) {
@@ -2404,13 +2459,12 @@ struct DFKMapView: View {
                 await TransportRouteCompletion.prepare(transports)
             }
             .onReceive(NotificationCenter.default.publisher(for: TransportRouteCompletion.didChange)) { _ in
-                // Live maps can redraw each route. Snapshot cards must finish
-                // their first frame instead of restarting for every queued gap.
-                guard isInteractive else { return }
+                // A single completed gap would invalidate the entire review period.
+                guard isInteractive, !usesReviewTransportOverview else { return }
                 inferredRoutesRevision = TransportRouteCompletion.revision
             }
             .onReceive(NotificationCenter.default.publisher(for: TransportRouteCompletion.didFinishBatch)) { _ in
-                guard !isInteractive else { return }
+                guard !isInteractive || usesReviewTransportOverview else { return }
                 inferredRoutesRevision = TransportRouteCompletion.revision
             }
             .task(id: "\(mapContent.key ?? 0)|\(mapContent.key == nil)|\(placeClusteringRegionToken)|\(isInteractive ? 0 : Int(transportMapWidth.rounded()))") {
@@ -2595,7 +2649,9 @@ struct DFKMapView: View {
 
     private func standardFootprintAnnotationContent(for aggregated: AggregatedFootprint, showsPhoto: Bool? = nil) -> some View {
         let fp = aggregated.representative
-        let isSelected = aggregated.footprints.contains { $0.footprintID == selectedFootprintID }
+        let isSelected = selectedFootprintID.map { selected in
+            aggregated.footprints.contains { $0.footprintID == selected }
+        } ?? false
         let activity = fp.getActivityType(from: allActivities)
         let photoImage = (showsPhoto ?? !prefersActivityIcons)
             ? latestPhotoAssetID(for: aggregated).flatMap { liveMapPhotoImages[$0] }

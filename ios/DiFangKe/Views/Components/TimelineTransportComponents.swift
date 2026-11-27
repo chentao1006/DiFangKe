@@ -947,6 +947,17 @@ enum DayRoutePlaybackCameraFraming {
     }
 }
 
+extension Binding where Value == MapCameraPosition {
+    /// MapKit marks camera writes originating from user navigation.
+    @MainActor
+    func onUserMapMove(_ action: @escaping @MainActor () -> Void) -> Binding<Value> {
+        Binding(get: { wrappedValue }, set: { position, transaction in
+            if position.positionedByUser { action() }
+            self.transaction(transaction).wrappedValue = position
+        })
+    }
+}
+
 enum RouteMapNativeGestureKind: Hashable {
     case pan
     case zoom
@@ -1930,7 +1941,9 @@ struct TransportModalView: View {
                 GeometryReader { geometry in
                     if geometry.size.width > 1 && geometry.size.height > 1 && interactiveMapReady {
                         MapReader { proxy in
-                            Map(position: $position) {
+                            Map(position: $position.onUserMapMove {
+                                if followsRouteAnimation { followsRouteAnimation = false }
+                            }) {
                             // Important Places Circles (isUserDefined)
                             ForEach(allPlaces.filter {
                                 $0.isUserDefined &&

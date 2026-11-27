@@ -198,7 +198,7 @@ struct SettingsView: View {
                 }
             }
 
-            Section(header: Text("关于"), footer: Text("示例路线 © [OpenStreetMap](https://www.openstreetmap.org/copyright)")) {
+            Section("关于") {
                 HStack {
                     Text("版本号")
                     Spacer()

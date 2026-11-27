@@ -72,6 +72,14 @@ struct MainTabView: View {
 
     var initialDate: Date?
     var tripContainer: ModelContainer?
+    @Environment(\.modelContext) private var modelContext
+    @Environment(\.scenePhase) private var scenePhase
+    @State private var pastMemory: PastFootprintMemory?
+    @State private var pastMemoryPhotos: [String] = []
+    @GestureState(resetTransaction: Transaction(animation: .easeOut)) private var bannerDragOffset: CGFloat = 0
+    @State private var bannerPresentation = PastMemoryBannerPresentation()
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var memoryRefresh = 0
     @State private var selectedTab: Tab = .records
     @State private var isPresented = true
     @State private var presentationDetent: PresentationDetent = .medium
@@ -120,7 +128,9 @@ struct MainTabView: View {
                 onRequestRecords: { selectedTab = .records },
                 onPlaybackStateChanged: { isRecordPlaybackActive = $0 }
             ) { map, records in
-                nativeTabs(records: AnyView(recordScreen(map: map, records: records, usesColumns: usesColumns)))
+                let landscapeTopInset = geometry.size.width > geometry.size.height ? geometry.safeAreaInsets.top : nil
+                nativeTabs(records: AnyView(recordsWithBanner(map: map, records: records, usesColumns: usesColumns,
+                                                              landscapeTopInset: landscapeTopInset)))
             }
             .onChange(of: usesColumns, initial: true) { _, newValue in
                 usesColumnLayout = newValue
@@ -139,6 +149,116 @@ struct MainTabView: View {
             }
         }
         .onOpenURL(perform: handleTripDeepLink)
+    }
+
+    private func pastMemoryBanner(_ memory: PastFootprintMemory, open: @escaping () -> Void, collapse: @escaping () -> Void) -> some View {
+        HStack(spacing: 0) {
+            Button(action: open) {
+                HStack(spacing: 12) {
+                    Group {
+                        if pastMemoryPhotos.isEmpty {
+                            Image(systemName: "clock.arrow.circlepath")
+                                .font(.title2)
+                                .foregroundStyle(Color.dfkAccent)
+                        } else {
+                            ContinuousTimelinePhotoThumbnail(assetIDs: pastMemoryPhotos, fillsAvailableSpace: true,
+                                                             prefersEarliestPhoto: true)
+                        }
+                    }
+                    .frame(width: 60, height: 52)
+                    .clipShape(RoundedRectangle(cornerRadius: 10))
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("往年今日 · \(memory.yearsAgo)年前")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(Color.dfkAccent)
+                        Text(memory.title).font(.headline).lineLimit(1)
+                    }
+                    Spacer()
+                }
+                .contentShape(Rectangle())
+            }
+            Button(action: collapse) {
+                Image(systemName: "xmark")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 44, height: 44)
+                    .contentShape(Rectangle())
+            }
+            .accessibilityLabel("关闭往年今日")
+        }
+        .padding(10)
+        .dfkDetailMaterial(in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .buttonStyle(.plain)
+        .contentShape(Rectangle())
+        .highPriorityGesture(
+            DragGesture(coordinateSpace: .global)
+                .updating($bannerDragOffset) { value, offset, _ in
+                    let delta = value.translation
+                    offset = -delta.height > abs(delta.width) ? delta.height : 0
+                }
+                .onEnded { value in
+                    let delta = value.translation
+                    if -delta.height > abs(delta.width) { collapse() }
+                }
+        )
+        .offset(y: reduceMotion ? 0 : bannerDragOffset)
+        .padding(.horizontal)
+        .padding(.vertical, 4)
+    }
+
+    private func recordsWithBanner(map: AnyView, records: AnyView, usesColumns: Bool, landscapeTopInset: CGFloat?) -> some View {
+        let today = Calendar.current.startOfDay(for: Date())
+        let viewingToday = Calendar.current.isDate(selectedDate, inSameDayAs: today)
+        let canShowBanner = viewingToday && bannerPresentation.collapsedOn != today
+        let eligible = selectedTab == .records && scenePhase == .active && canShowBanner && pastMemory != nil
+        let collapsed = bannerPresentation.collapsedOn == today
+        func collapse() {
+            withAnimation(.easeOut) { bannerPresentation.collapsedOn = today }
+        }
+        let mapWithBanner = map.environment(\.pastMemoryPresentation, pastMemory == nil ? nil : bannerPresentation).overlay(alignment: .top) {
+            if !collapsed, bannerPresentation.shownOn == today, let pastMemory {
+                pastMemoryBanner(pastMemory, open: {
+                    collapse()
+                    openRecord(date: pastMemory.startTime)
+                }, collapse: collapse)
+                    .if(landscapeTopInset != nil) { banner in
+                        banner
+                            .padding(.top, landscapeTopInset ?? 0)
+                            .frame(maxHeight: .infinity, alignment: .top)
+                            .ignoresSafeArea(.container, edges: .top)
+                    }
+                    .transition(reduceMotion ? .opacity : .move(edge: .top).combined(with: .opacity))
+            }
+        }
+        return recordScreen(map: AnyView(mapWithBanner), records: records, usesColumns: usesColumns)
+        .task(id: eligible ? today : nil) {
+            guard eligible, bannerPresentation.shownOn != today else { return }
+            do {
+                try await Task.sleep(for: .seconds(AppConfig.shared.pastMemoryBannerDelay))
+            } catch { return }
+            guard !Task.isCancelled else { return }
+            withAnimation(.easeOut) { bannerPresentation.shownOn = today }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: Notification.Name("FootprintDataChanged"))) { _ in
+            memoryRefresh += 1
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .NSCalendarDayChanged)) { _ in
+            memoryRefresh += 1
+        }
+        .task(id: "\(memoryRefresh)-\(selectedTab == .records)-\(scenePhase == .active)") {
+            guard selectedTab == .records, scenePhase == .active else { return }
+            let memory = await PastFootprintMemory.load(for: Date(), container: modelContext.container)
+            guard !Task.isCancelled else { return }
+            pastMemory = memory
+            pastMemoryPhotos = memory?.assetIDs ?? []
+            guard let memory else { return }
+            let photos = await PhotoService.shared.displayableAssetIDs(
+                storedAssetIDs: memory.assetIDs, startTime: memory.startTime, endTime: memory.endTime,
+                coordinate: CLLocationCoordinate2D(latitude: memory.latitude, longitude: memory.longitude)
+            )
+            guard !Task.isCancelled else { return }
+            pastMemoryPhotos = photos
+        }
     }
 
     @ViewBuilder

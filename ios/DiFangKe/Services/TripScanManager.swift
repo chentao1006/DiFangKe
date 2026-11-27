@@ -136,17 +136,23 @@ final class TripScanManager {
         legacyContainer: ModelContainer?
     ) -> ProgressSnapshot? {
         let context = ModelContext(tripContainer)
-        let activeTrips = (try? context.fetch(FetchDescriptor<Trip>()))?.filter { $0.state == .active } ?? []
-        guard let trip = activeTrips.sorted(by: { ($0.actualStartedAt ?? .distantPast) > ($1.actualStartedAt ?? .distantPast) }).first else {
-            return nil
-        }
+        let active = TripState.active.rawValue
+        var activeTrip = FetchDescriptor<Trip>(
+            predicate: #Predicate { $0.stateRaw == active },
+            sortBy: [SortDescriptor(\Trip.actualStartedAt, order: .reverse)]
+        )
+        activeTrip.fetchLimit = 1
+        guard let trip = (try? context.fetch(activeTrip))?.first else { return nil }
         let tripID = trip.id
         let days = ((try? context.fetch(FetchDescriptor<TripDay>(predicate: #Predicate { $0.tripID == tripID }))) ?? [])
             .sorted { $0.day == $1.day ? $0.orderIndex < $1.orderIndex : $0.day < $1.day }
         let dayOrder = Dictionary(uniqueKeysWithValues: days.enumerated().map { ($0.element.id, $0.offset) })
         let stopKind = TripItemKind.stop.rawValue
-        let orderedStops = ((try? context.fetch(FetchDescriptor<TripItem>(predicate: #Predicate { $0.kindRaw == stopKind }))) ?? [])
-            .filter { dayOrder[$0.tripDayID] != nil }
+        let dayIDs = days.map(\.id)
+        let stops = FetchDescriptor<TripItem>(predicate: #Predicate {
+            $0.kindRaw == stopKind && dayIDs.contains($0.tripDayID)
+        })
+        let orderedStops = ((try? context.fetch(stops)) ?? [])
             .sorted(by: {
                 let leftDay = dayOrder[$0.tripDayID] ?? .max
                 let rightDay = dayOrder[$1.tripDayID] ?? .max

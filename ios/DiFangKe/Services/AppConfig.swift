@@ -59,6 +59,10 @@ class AppConfig {
         config[key] as? [String] ?? []
     }
     
+    func randomShareBrandSlogan() -> String {
+        stringArray(forKey: "SHARE_BRAND_SLOGANS").randomElement() ?? ""
+    }
+
     func uint64(forKey key: String) -> UInt64 {
         if let val = config[key] as? NSNumber {
             return val.uint64Value
@@ -666,6 +670,10 @@ class AppConfig {
         int(forKey: "PAST_MEMORIES_CHECK_HOUR")
     }
 
+    var pastMemoryBannerDelay: TimeInterval {
+        double(forKey: "PAST_MEMORY_BANNER_DELAY_SECONDS")
+    }
+
     var reviewMemoryLongStayMinDuration: Double {
         double(forKey: "REVIEW_MEMORY_LONG_STAY_MIN_DURATION")
     }
@@ -688,6 +696,18 @@ class AppConfig {
 
     var reviewMemoryMinimumScore: Double {
         double(forKey: "REVIEW_MEMORY_MINIMUM_SCORE")
+    }
+
+    var reviewMemoryBusyDayMinLegs: Int {
+        int(forKey: "REVIEW_MEMORY_BUSY_DAY_MIN_LEGS")
+    }
+
+    var reviewMemoryBusyDayMaxStaySeconds: Double {
+        double(forKey: "REVIEW_MEMORY_BUSY_DAY_MAX_STAY_SECONDS")
+    }
+
+    var reviewMemoryDailyVarietyMinCount: Int {
+        int(forKey: "REVIEW_MEMORY_DAILY_VARIETY_MIN_COUNT")
     }
 
     var reviewMemoryMaximumCount: Int {

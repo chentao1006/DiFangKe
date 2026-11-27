@@ -3420,59 +3420,11 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
     private func sendPastMemoriesNotificationIfAvailable(for date: Date) async {
         guard let container = modelContext?.container else { return }
 
-        // Full-history fetch and calendar math run on a background context;
-        // only the notification is sent from the main actor.
-        let highlight = await Task.detached(priority: .utility) { () -> (startTime: Date, address: String?)? in
-            let context = ModelContext(container)
-            let calendar = Calendar.current
-            
-            let month = calendar.component(.month, from: date)
-            let day = calendar.component(.day, from: date)
-            let currentYear = calendar.component(.year, from: date)
-            
-            // 查找往年今日的足迹 (排除今年)
-            let descriptor = FetchDescriptor<Footprint>()
-            let allFootprints = (try? context.fetch(descriptor)) ?? []
-
-            // 过滤往年今日
-            let pastFootprints = allFootprints.filter { fp in
-                let fpYear = calendar.component(.year, from: fp.startTime)
-                let fpMonth = calendar.component(.month, from: fp.startTime)
-                let fpDay = calendar.component(.day, from: fp.startTime)
-
-                if fp.placeID == nil || (fp.activityTypeValue ?? "").isEmpty {
-                    return false
-                }
-
-                return fpYear < currentYear && fpMonth == month && fpDay == day
-            }
-
-            guard !pastFootprints.isEmpty else { return nil }
-
-            // 排除重要地点 (isPriority = true)
-            // 获取所有重要地点的 ID
-            let placeDescriptor = FetchDescriptor<Place>(predicate: #Predicate<Place> { $0.isPriority })
-            let importantPlaceIDs = Set((try? context.fetch(placeDescriptor))?.map { $0.placeID } ?? [])
-
-            let filteredFootprints = pastFootprints.filter { fp in
-                if let pid = fp.placeID, importantPlaceIDs.contains(pid) {
-                    return false
-                }
-                return true
-            }.sorted { $0.startTime < $1.startTime }
-
-            guard let highlight = filteredFootprints.first else { return nil }
-            return (highlight.startTime, highlight.address)
-        }.value
-        
-        guard let highlight else { return }
-        
-        let calendar = Calendar.current
-        let currentYear = calendar.component(.year, from: date)
-        let fpYear = calendar.component(.year, from: highlight.startTime)
-        let yearsAgo = currentYear - fpYear
+        guard let highlight = await PastFootprintMemory.load(for: date, container: container) else { return }
+        let yearsAgo = highlight.yearsAgo
+        let fpYear = highlight.year
         let placeName = highlight.address ?? "某个地方"
-        
+
         let title = "往年今日 · \(yearsAgo)年前"
         let body = "在 \(fpYear) 年的今天，你去了「\(placeName)」。点此重温那段时光。"
         
@@ -6646,3 +6598,52 @@ final class CurrentLiveActivityManager {
 #endif
 
 #endif
+
+struct PastFootprintMemory: Sendable {
+    let startTime: Date
+    let endTime: Date
+    let year: Int
+    let yearsAgo: Int
+    let title: String
+    let address: String?
+    let assetIDs: [String]
+    let latitude: Double
+    let longitude: Double
+
+    static func load(for date: Date, container: ModelContainer) async -> Self? {
+        await Task.detached(priority: .utility) { () -> Self? in
+            let context = ModelContext(container)
+            let calendar = Calendar.current
+            let today = calendar.dateComponents([.year, .month, .day], from: date)
+            var oldest = FetchDescriptor<Footprint>(sortBy: [SortDescriptor(\.startTime)])
+            oldest.fetchLimit = 1
+            guard let first = try? context.fetch(oldest).first,
+                  let currentYear = today.year else { return nil }
+            let firstYear = calendar.component(.year, from: first.startTime)
+            guard firstYear < currentYear,
+                  let places = try? context.fetch(FetchDescriptor<Place>()) else { return nil }
+            for year in firstYear..<currentYear {
+                var anniversary = today
+                anniversary.year = year
+                guard let start = calendar.date(from: anniversary),
+                      calendar.component(.day, from: start) == today.day,
+                      let end = calendar.date(byAdding: .day, value: 1, to: start) else { continue }
+                let query = FetchDescriptor<Footprint>(
+                    predicate: #Predicate { $0.startTime >= start && $0.startTime < end && $0.statusValue != "ignored" },
+                    sortBy: [SortDescriptor(\.startTime)]
+                )
+                for footprint in (try? context.fetch(query)) ?? [] {
+                    guard let id = footprint.placeID, !(footprint.activityTypeValue ?? "").isEmpty else { continue }
+                    let place = places.first { $0.placeID == id }
+                    guard place?.isPriority != true else { continue }
+                    let title = [place?.name, footprint.address].compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }.first { !$0.isEmpty }
+                    return Self(startTime: footprint.startTime, endTime: footprint.endTime,
+                                year: year, yearsAgo: currentYear - year, title: title ?? "这个地方",
+                                address: footprint.address, assetIDs: footprint.photoAssetIDs,
+                                latitude: footprint.latitude, longitude: footprint.longitude)
+                }
+            }
+            return nil
+        }.value
+    }
+}

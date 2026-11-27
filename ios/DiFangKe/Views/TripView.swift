@@ -8973,7 +8973,9 @@ struct TripDetailView: View {
 
             GeometryReader { detailViewport in
                 ZStack(alignment: .bottom) {
-                Map(position: $cameraPosition) {
+                Map(position: $cameraPosition.onUserMapMove {
+                    if !tripPlayback.frames.isEmpty, followsTripPlayback { disableTripPlaybackFollow() }
+                }) {
                     BrowseMapRoutes(routes: tripPlayback.frames.isEmpty ? mapModel.mapRoutes : tripPlayback.mapRoutes,
                                     highlighted: tripPlaybackHighlightedRoutes, playing: !tripPlayback.frames.isEmpty)
                     tripMapContent
@@ -9749,17 +9751,22 @@ struct TripDetailView: View {
         return label
     }
 
+    private func disableTripPlaybackFollow() {
+        followsTripPlayback = false
+        tripPlaybackCameraTransitionTask?.cancel()
+        tripPlaybackCameraTransitionTask = nil
+        tripPlaybackCameraTransitionID = nil
+        isTripPlaybackCameraTransitioning = false
+        isTouchingTripPlaybackMap = false
+    }
+
     private var tripPlaybackFollowButton: some View {
         Button {
-            followsTripPlayback.toggle()
-            if followsTripPlayback, let frame = currentTripPlaybackFrame {
+            if followsTripPlayback {
+                disableTripPlaybackFollow()
+            } else if let frame = currentTripPlaybackFrame {
+                followsTripPlayback = true
                 beginTripPlaybackCameraTransition(to: frame)
-            } else {
-                tripPlaybackCameraTransitionTask?.cancel()
-                tripPlaybackCameraTransitionTask = nil
-                tripPlaybackCameraTransitionID = nil
-                isTripPlaybackCameraTransitioning = false
-                isTouchingTripPlaybackMap = false
             }
         } label: {
             Image(systemName: "plus.viewfinder")

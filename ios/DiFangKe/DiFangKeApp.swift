@@ -286,6 +286,7 @@ struct DiFangKeApp: App {
     @State private var foregroundWidgetSyncTask: Task<Void, Never>?
     @State private var backgroundWidgetSyncTask: Task<Void, Never>?
     @State private var watchHourlySyncTask: Task<Void, Never>?
+    @State private var activeCloudEvents: Set<UUID> = []
     @State private var didRunStartupDataMaintenance = false
     
     init() {
@@ -325,32 +326,22 @@ struct DiFangKeApp: App {
                                     // timeline can read it.
                                     PhotoImportDraftRecovery.discardPending(in: context)
 
-                                    // Clean up duplicates created by older builds
-                                    // before the timeline reads them.  New rebuilds
-                                    // are guarded at insertion time as well.
-                                    if !didRunStartupDataMaintenance {
-                                        didRunStartupDataMaintenance = true
-                                        // Whole-database fetches and pairwise
-                                        // comparisons run on background contexts;
-                                        // the timeline refreshes via the
-                                        // notification once they have saved.
-                                        Task { @MainActor in
-                                            let exactClonesRemoved = await DataDeduplicationService.reconcileImportedDuplicatesInBackground(in: container)
-                                            let transportsRemoved = await DataDeduplicationService.deduplicateTransports(in: container)
-                                            if exactClonesRemoved > 0 || transportsRemoved > 0 {
-                                                TimelineBuilder.timelineCache.removeAll()
-                                                NotificationCenter.default.post(name: NSNotification.Name("FootprintDataChanged"), object: nil)
-                                            }
-                                        }
-                                    }
-                                    
                                     let isEnabled = UserDefaults.standard.object(forKey: "isTrackingEnabled") as? Bool ?? true
                                     if isEnabled {
                                         locationManager.startTracking()
                                     }
                                     
                                     setupDefaultData(context: context)
-                                    WidgetDataSyncManager.shared.updateContainer(container)
+                                }
+                                .task(id: activeCloudEvents.isEmpty) {
+                                    guard activeCloudEvents.isEmpty, !didRunStartupDataMaintenance else { return }
+                                    didRunStartupDataMaintenance = true
+                                    let clones = await DataDeduplicationService.reconcileImportedDuplicatesInBackground(in: container)
+                                    let transports = await DataDeduplicationService.deduplicateTransports(in: container)
+                                    if clones > 0 || transports > 0 {
+                                        TimelineBuilder.timelineCache.removeAll()
+                                        NotificationCenter.default.post(name: NSNotification.Name("FootprintDataChanged"), object: nil)
+                                    }
                                 }
                                 .transition(.opacity)
                         }
@@ -497,25 +488,10 @@ struct DiFangKeApp: App {
         if let error = event.error as NSError? {
             print("[CloudSync] error domain=\(error.domain) code=\(error.code) details=\(error.userInfo)")
         }
-        guard event.type == .import, event.endDate != nil, event.succeeded,
-              let container = modelContainer else { return }
-        // Read the persisted result in a fresh background context, independent
-        // of the timeline's cached models. Never modify records for diagnosis.
-        Task.detached(priority: .utility) {
-            let context = ModelContext(container)
-            var descriptor = FetchDescriptor<Footprint>(
-                sortBy: [SortDescriptor(\Footprint.startTime, order: .reverse)]
-            )
-            descriptor.fetchLimit = 1
-            do {
-                if let latest = try context.fetch(descriptor).first {
-                    print("[CloudSync] localLatestFootprint start=\(latest.startTime) end=\(latest.endTime) status=\(latest.statusValue)")
-                } else {
-                    print("[CloudSync] localLatestFootprint=none")
-                }
-            } catch {
-                print("[CloudSync] localLatestFootprint readError=\(error)")
-            }
+        if event.endDate == nil {
+            activeCloudEvents.insert(event.identifier)
+        } else {
+            activeCloudEvents.remove(event.identifier)
         }
     }
 
@@ -556,6 +532,7 @@ struct DiFangKeApp: App {
             }
 
             await MainActor.run {
+                WidgetDataSyncManager.shared.updateContainer(container)
                 TripScanManager.shared.configure(
                     legacyContainer: container,
                     tripContainer: tripContainer

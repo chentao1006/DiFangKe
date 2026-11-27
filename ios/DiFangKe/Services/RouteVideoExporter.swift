@@ -608,7 +608,7 @@ enum RouteVideoExporter {
             let scale = outputSize.width / 1080
             let view = DFKShareBrandIdentity(
                 brandName: "地方客",
-                brandSlogan: "走过的地方，就是你的生活",
+                brandSlogan: AppConfig.shared.randomShareBrandSlogan(),
                 logoSize: 90 * scale,
                 logoCornerRadius: 21 * scale,
                 nameFont: .system(size: 39 * scale, weight: .semibold),
