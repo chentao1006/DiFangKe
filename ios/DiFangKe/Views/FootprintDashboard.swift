@@ -5,6 +5,7 @@ import simd
 import WeatherKit
 
 private enum DashboardSample {
+    case refresh
     case fix(CLLocation, CLLocation)
     case acceleration(SIMD3<Double>, time: TimeInterval, heading: Double, trueNorth: Bool)
 }
@@ -31,11 +32,32 @@ private struct DashboardMeter {
     var courseRadians = 0.0
     var motionVelocity = SIMD3<Double>.zero
     let decaySeconds = AppConfig.shared.double(forKey: "DASHBOARD_MOTION_DECAY_SECONDS")
+    private let maximumAcceleration = AppConfig.shared.double(forKey: "DASHBOARD_MAX_MOTION_ACCELERATION_MPS2")
+    private var speedSamples: [Double] = []
+    private var detectedShake = false
     var motionTime: TimeInterval?
     let start: Date
 
+    init(start: Date) { self.start = start }
+
     mutating func accept(_ sample: DashboardSample) {
         switch sample {
+        case .refresh:
+            defer {
+                speedSamples.removeAll(keepingCapacity: true)
+                detectedShake = false
+            }
+            guard !speedSamples.isEmpty else { return }
+            let speed: Double
+            if detectedShake {
+                speed = freshGroundSpeed * 3.6
+            } else {
+                speedSamples.sort()
+                let middle = speedSamples.count / 2
+                speed = (speedSamples[middle] + speedSamples[(speedSamples.count - 1) / 2]) / 2
+            }
+            reading.speed = speed
+            reading.highest = max(reading.highest ?? speed, speed)
         case let .fix(location, mapped):
             guard location.timestamp.timeIntervalSince(start) >= -AppConfig.shared.currentLocationFreshnessThreshold,
                   location.timestamp > (previous?.timestamp ?? .distantPast),
@@ -69,7 +91,11 @@ private struct DashboardMeter {
             alignedToNorth = trueNorth
             if !hasCourse, heading >= 0 { reading.heading = heading.rounded() }
             defer { motionTime = time }
-            if let last = motionTime, time > last {
+            if simd_length(acceleration) > maximumAcceleration {
+                detectedShake = true
+                motionVelocity = .zero
+            }
+            if !detectedShake, let last = motionTime, time > last {
                 let dt = time - last
                 // A leaky integral isolates short handset movements and drops
                 // residual velocity after a pause in sensor delivery.
@@ -104,9 +130,13 @@ private struct DashboardMeter {
 
     var alignedToNorth = false
 
-    mutating func updateSpeed(trueNorth: Bool) {
+    private var freshGroundSpeed: Double {
         let fresh = lastFixTime.map { -$0.timeIntervalSinceNow < AppConfig.shared.currentLocationFreshnessThreshold } ?? false
-        let baseline = fresh ? groundSpeed : 0
+        return fresh ? groundSpeed : 0
+    }
+
+    mutating func updateSpeed(trueNorth: Bool) {
+        let baseline = freshGroundSpeed
         let speed: Double
         if trueNorth && hasCourse {
             let ground = SIMD3(baseline * cos(courseRadians), baseline * sin(courseRadians), 0)
@@ -114,9 +144,7 @@ private struct DashboardMeter {
         } else {
             speed = hypot(baseline, simd_length(motionVelocity))
         }
-        let kmh = speed * 3.6
-        reading.speed = kmh
-        reading.highest = max(reading.highest ?? kmh, kmh)
+        if speed.isFinite { speedSamples.append(speed * 3.6) }
     }
 
 }
@@ -144,6 +172,8 @@ struct FootprintDashboard: View {
     @State private var interactionID = UUID()
     @State private var resume: Task<Void, Never>?
     @State private var idleTimerBefore: Bool?
+    @Namespace private var mapScope
+    @ScaledMetric(relativeTo: .largeTitle) private var elapsedFontSize: CGFloat = 44
     @State private var samples = AsyncStream<DashboardSample>.makeStream()
 
     init(locationManager: LocationManager) {
@@ -165,9 +195,13 @@ struct FootprintDashboard: View {
             let bounds = (extent * 0.35)...(extent * 0.60)
             let fraction = horizontal ? landscapeFraction : portraitFraction
             let mapExtent = min(bounds.upperBound, max(bounds.lowerBound, dragExtent ?? extent * fraction))
+            let mapHeight = horizontal ? geometry.size.height : mapExtent
+            let anchorY = AppConfig.shared.double(forKey: "DASHBOARD_MAP_ANCHOR_Y_FRACTION")
+            // The follow target sits at the midpoint of the map's unobscured camera area.
+            let cameraTopInset = mapHeight * (2 * anchorY - 1)
             let layout = horizontal ? AnyLayout(HStackLayout(spacing: 0)) : AnyLayout(VStackLayout(spacing: 0))
             layout {
-                Map(position: $position) {
+                Map(position: $position, scope: mapScope) {
                     UserAnnotation()
                     BrowseMapRoutes(routes: reading.routes)
                 }
@@ -177,7 +211,9 @@ struct FootprintDashboard: View {
                         updateInteraction()
                     }
                 }
-                .browseMapStyle(elevation: .realistic, colorSchemeOverride: .dark)
+                .browseMapStyle(elevation: .realistic)
+                // The camera inset below would push the built-in compass down with the follow target.
+                .mapControls { }
                 .background {
                     RouteMapNativeGestureObserver(onInteractionChanged: { kind, active in
                         if active {
@@ -191,6 +227,7 @@ struct FootprintDashboard: View {
                         updateInteraction()
                     })
                 }
+                .safeAreaPadding(.top, cameraTopInset)
                 .frame(width: horizontal ? mapExtent : nil,
                        height: horizontal ? nil : mapExtent)
                 .overlay(alignment: .topLeading) {
@@ -201,6 +238,11 @@ struct FootprintDashboard: View {
                     .accessibilityLabel("退出仪表盘")
                     .padding(10)
                 }
+                .overlay(alignment: .topTrailing) {
+                    MapCompass(scope: mapScope)
+                        .padding(10)
+                }
+                .mapScope(mapScope)
                 MapPanelResizeHandle(horizontal: horizontal, extent: mapExtent, bounds: bounds,
                                      onChange: { dragExtent = $0 }, onEnd: { final in
                     if horizontal { landscapeFraction = final / extent }
@@ -217,7 +259,9 @@ struct FootprintDashboard: View {
             }
             .onChange(of: horizontal) { _, _ in dragExtent = nil }
         }
-        .statusBarHidden()
+        .background {
+            DFKEdgeDismissGesture(onDismiss: { confirmingExit = true })
+        }
         .interactiveDismissDisabled()
         .alert("退出仪表盘？", isPresented: $confirmingExit) {
             Button("继续使用", role: .cancel) { }
@@ -332,12 +376,23 @@ struct FootprintDashboard: View {
                                          heading: trueNorth ? data.heading : -1, trueNorth: trueNorth))
             }
         }
-        defer { motion.stopDeviceMotionUpdates() }
+        let interval = AppConfig.shared.double(forKey: "DASHBOARD_SPEED_REFRESH_SECONDS")
+        let ticker = Task {
+            while !Task.isCancelled {
+                do { try await Task.sleep(for: .seconds(interval)) } catch { return }
+                sink.yield(.refresh)
+            }
+        }
+        defer {
+            ticker.cancel()
+            motion.stopDeviceMotionUpdates()
+        }
         let worker = Task.detached { [stream = samples.stream, start] in
             var meter = DashboardMeter(start: start)
             for await sample in stream {
                 guard !Task.isCancelled else { break }
                 meter.accept(sample)
+                guard case .refresh = sample else { continue }
                 let value = meter.reading
                 await MainActor.run { reading = value }
             }
@@ -348,61 +403,73 @@ struct FootprintDashboard: View {
     private var instruments: some View {
         VStack(spacing: 6) {
             HStack(alignment: .top) {
-                DashboardBattery()
-                Spacer()
-                VStack(alignment: .trailing, spacing: 2) {
+                VStack(alignment: .leading, spacing: 2) {
                     if let weather {
                         let temperature = weather.temperature.converted(to: .celsius).value
-                            .formatted(.number.precision(.fractionLength(0))) + "°C"
+                            .formatted(.number.precision(.fractionLength(0)))
+                        Text(weather.date, style: .time)
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                            .accessibilityHidden(true)
                         HStack(spacing: 4) {
-                            Text(weather.date, style: .time)
-                                .font(.caption.monospacedDigit())
-                                .foregroundStyle(.secondary)
                             Image(systemName: weather.symbolName)
                                 .symbolRenderingMode(.multicolor)
-                            Text(temperature)
+                            auxiliaryReading(temperature, unit: "°C")
                         }
                         .font(.headline.monospacedDigit())
                         .accessibilityElement(children: .ignore)
                         .accessibilityLabel(Text("\(weather.date, style: .time) 预报，\(weather.condition.description)"))
-                        .accessibilityValue(Text(temperature))
+                        .accessibilityValue(Text("\(temperature) 摄氏度"))
+                        if let attribution {
+                            Link(destination: attribution.legalPageURL) {
+                                AsyncImage(url: attribution.combinedMarkDarkURL) { image in
+                                    image.resizable().scaledToFit()
+                                } placeholder: { Text(" Weather").font(.caption2) }
+                            }
+                            .frame(height: 11)
+                            .opacity(0.35)
+                            .fixedSize(horizontal: true, vertical: false)
+                            .accessibilityLabel("Apple Weather 数据来源")
+                        }
                     } else {
-                        metric("天气", weatherPlaceholder)
-                    }
-                    if let attribution {
-                        Link(destination: attribution.legalPageURL) {
-                            AsyncImage(url: attribution.combinedMarkLightURL) { image in
-                                image.resizable().scaledToFit()
-                            } placeholder: { Text(" Weather").font(.caption2) }
-                        }.frame(height: 12)
+                        Text(weatherPlaceholder).font(.headline)
                     }
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                SwiftUI.TimelineView(.periodic(from: start, by: 1)) { tick in
+                    let elapsed = max(0, tick.date.timeIntervalSince(start)).rounded(.down)
+                    Text(Duration.seconds(elapsed).formatted(.time(pattern: elapsed < 3600
+                        ? .minuteSecond
+                        : .hourMinute(padHourToLength: 1, roundSeconds: .down))))
+                        .font(.system(size: elapsedFontSize, weight: .semibold).monospacedDigit())
+                        .fixedSize()
+                }
+                metric("里程", number(reading.kilometers, places: 2), unit: "km", alignment: .trailing)
+                    .frame(maxWidth: .infinity, alignment: .trailing)
             }
-            Spacer(minLength: 0)
-            HStack(spacing: 16) {
-                Text("海拔 \(number(reading.altitude)) m")
-                Text("↑ \(number(reading.ascent)) m")
-                    .accessibilityLabel("累计爬升 \(number(reading.ascent)) 米")
-            }
-            .font(.subheadline.monospacedDigit())
             Spacer(minLength: 0)
             SegmentSpeed(speed: reading.speed)
                 .frame(maxWidth: 340, maxHeight: 138)
                 .accessibilityLabel("时速 \(number(reading.speed)) 公里")
             Text("km/h").font(.caption.bold()).foregroundStyle(.secondary)
             Spacer(minLength: 0)
-            SwiftUI.TimelineView(.periodic(from: start, by: 1)) { tick in
-                Text(Duration.seconds(max(0, tick.date.timeIntervalSince(start)).rounded(.down))
-                    .formatted(.time(pattern: .hourMinuteSecond)))
-                    .font(.title.monospacedDigit().weight(.semibold))
-            }
-            Spacer(minLength: 0)
             HStack(alignment: .firstTextBaseline) {
-                metric("平均速度", number(reading.average) + " km/h")
-                metric("最高速度", number(reading.highest) + " km/h", font: .subheadline)
-                    .foregroundStyle(.secondary)
-                Spacer(minLength: 4)
-                metric("累计里程", number(reading.kilometers, places: 2) + " km")
+                metric("均速", number(reading.average), unit: "km/h")
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                VStack(spacing: 2) {
+                    Text("海拔").font(.caption).foregroundStyle(.secondary).accessibilityHidden(true)
+                    HStack(spacing: 16) {
+                        auxiliaryReading(number(reading.altitude), unit: "m")
+                            .accessibilityLabel("海拔 \(number(reading.altitude)) 米")
+                        if let ascent = reading.ascent?.rounded(.toNearestOrEven), ascent > 0 {
+                            auxiliaryReading("↑ \(number(ascent))", unit: "m")
+                                .accessibilityLabel("累计爬升 \(number(ascent)) 米")
+                        }
+                    }
+                    .font(.headline.monospacedDigit())
+                }
+                metric("最高", number(reading.highest), unit: "km/h", alignment: .trailing)
+                    .frame(maxWidth: .infinity, alignment: .trailing)
             }
         }
         .padding()
@@ -415,106 +482,75 @@ struct FootprintDashboard: View {
         value?.formatted(.number.grouping(.never).precision(.fractionLength(places))) ?? "—"
     }
 
-    private func metric(_ title: String, _ value: String, font: Font = .headline) -> some View {
-        Text(value)
-            .font(font.monospacedDigit())
-            .accessibilityLabel(Text(title))
-            .accessibilityValue(Text(value))
-    }
-}
-
-private struct DashboardBattery: View {
-    @Environment(\.scenePhase) private var phase
-    @State private var previousMonitoring: Bool?
-    @State private var level: Float = -1
-    @State private var state: UIDevice.BatteryState = .unknown
-    @State private var lowPower = false
-
-    private func refresh() {
-        level = UIDevice.current.batteryLevel
-        state = UIDevice.current.batteryState
-        lowPower = ProcessInfo.processInfo.isLowPowerModeEnabled
-    }
-
-    private var symbol: String {
-        if state == .charging { return "battery.100percent.bolt" }
-        guard level >= 0 else { return "battery.0percent" }
-        let step = Int((level * 4).rounded()) * 25
-        return "battery.\(step)percent"
-    }
-
-    private var tint: Color {
-        if lowPower { return .yellow }
-        if state == .charging || state == .full { return .green }
-        if level >= 0 && Double(level) <= AppConfig.shared.double(forKey: "DASHBOARD_LOW_BATTERY_FRACTION") { return .red }
-        return .primary
-    }
-
-    private var status: String {
-        switch state {
-        case .charging: return "充电中"
-        case .full: return "已充满"
-        case .unplugged: return lowPower ? "低电量模式" : "使用电池"
-        default: return "电池状态未知"
+    private func auxiliaryReading(_ value: String, unit: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 2) {
+            Text(value)
+            Text(unit).font(.caption2).foregroundStyle(.secondary)
         }
+        .accessibilityElement(children: .combine)
     }
 
-    var body: some View {
-        let percentage = level >= 0 ? level.formatted(.percent.precision(.fractionLength(0))) : "—"
-        HStack(spacing: 4) {
-            Image(systemName: symbol).foregroundStyle(tint)
-            Text(percentage)
+    private func metric(_ title: String, _ value: String, unit: String, alignment: HorizontalAlignment = .leading) -> some View {
+        VStack(alignment: alignment, spacing: 2) {
+            Text(title).font(.caption).foregroundStyle(.secondary)
+            auxiliaryReading(value, unit: unit).font(.headline.monospacedDigit())
         }
-        .font(.headline.monospacedDigit())
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel("电量")
-        .accessibilityValue(Text("\(percentage)，\(status)"))
-        .onAppear {
-            let device = UIDevice.current
-            previousMonitoring = device.isBatteryMonitoringEnabled
-            device.isBatteryMonitoringEnabled = true
-            refresh()
-        }
-        .onReceive(NotificationCenter.default.publisher(for: UIDevice.batteryLevelDidChangeNotification)) { _ in refresh() }
-        .onReceive(NotificationCenter.default.publisher(for: UIDevice.batteryStateDidChangeNotification)) { _ in refresh() }
-        .onReceive(NotificationCenter.default.publisher(for: .NSProcessInfoPowerStateDidChange)) { _ in refresh() }
-        .onChange(of: phase) { _, phase in if phase == .active { refresh() } }
-        .onDisappear {
-            if let previousMonitoring { UIDevice.current.isBatteryMonitoringEnabled = previousMonitoring }
-        }
+        .accessibilityElement(children: .combine)
     }
 }
 
 private struct SegmentSpeed: View {
     let speed: Double?
+    private static let glowMargin: CGFloat = 24
     private static let masks = [63, 6, 91, 79, 102, 109, 125, 7, 127, 111]
-    private static let strokes: [(CGPoint, CGPoint)] = [
-        (.init(x: 1,y: 0), .init(x: 8,y: 0)), (.init(x: 9,y: 1), .init(x: 9,y: 8)),
-        (.init(x: 9,y: 10), .init(x: 9,y: 17)), (.init(x: 8,y: 18), .init(x: 1,y: 18)),
-        (.init(x: 0,y: 17), .init(x: 0,y: 10)), (.init(x: 0,y: 8), .init(x: 0,y: 1)),
-        (.init(x: 1,y: 9), .init(x: 8,y: 9))
-    ]
+    // One beveled bar, reused horizontally and vertically in mask-bit order.
+    private static let segments: [Path] = {
+        var bar = Path()
+        bar.addLines([CGPoint(x: -4.3, y: 0), CGPoint(x: -3.4, y: -0.9), CGPoint(x: 3.4, y: -0.9),
+                      CGPoint(x: 4.3, y: 0), CGPoint(x: 3.4, y: 0.9),
+                      CGPoint(x: -3.4, y: 0.9)])
+        bar.closeSubpath()
+        func placed(_ x: CGFloat, _ y: CGFloat, vertical: Bool = false) -> Path {
+            bar.applying(CGAffineTransform(translationX: x, y: y)
+                .rotated(by: vertical ? .pi / 2 : 0))
+        }
+        return [placed(4.5, 0), placed(9, 4.5, vertical: true), placed(9, 13.5, vertical: true),
+                placed(4.5, 18), placed(0, 13.5, vertical: true), placed(0, 4.5, vertical: true),
+                placed(4.5, 9)]
+    }()
 
     var body: some View {
         Canvas { context, size in
             let digits = speed.flatMap { $0.isFinite ? Int(min(999, max(0, $0.rounded()))) : nil }
             let width = CGFloat(3 * 13 - 4)
-            let scale = min(size.height / 20, size.width / (width + 2))
-            context.translateBy(x: (size.width - width * scale) / 2, y: (size.height - 18 * scale) / 2)
-            context.scaleBy(x: scale, y: scale)
+            let margin = Self.glowMargin
+            let scale = min((size.height - 2 * margin) / 22, (size.width - 2 * margin) / (width + 4))
+            guard scale > 0 else { return }
+            let placement = CGAffineTransform(translationX: (size.width - width * scale) / 2,
+                                              y: (size.height - 18 * scale) / 2)
+                .scaledBy(x: scale, y: scale)
+            var illuminated = Path()
+            var offset: CGFloat = 0
             for place in [100, 10, 1] {
                 var mask = 0
                 if let digits, place == 1 || digits >= place {
                     mask = Self.masks[(digits / place) % 10]
                 }
-                for (i, segment) in Self.strokes.enumerated() {
-                    var path = Path()
-                    path.move(to: segment.0)
-                    path.addLine(to: segment.1)
-                    context.stroke(path, with: .color(.white.opacity(mask & (1 << i) == 0 ? 0.18 : 1)), lineWidth: 1.5)
+                let translation = placement.translatedBy(x: offset, y: 0)
+                for (i, segment) in Self.segments.enumerated() {
+                    if mask & (1 << i) == 0 {
+                        context.fill(segment.applying(translation), with: .color(.white.opacity(0.07)))
+                    } else {
+                        illuminated.addPath(segment, transform: translation)
+                    }
                 }
-                context.translateBy(x: 13, y: 0)
+                offset += 13
             }
+            // Apply both halos in display points so the digit transform cannot magnify the blur.
+            context.addFilter(.shadow(color: Color.dfkAccent.opacity(0.95), radius: scale))
+            context.addFilter(.shadow(color: .cyan.opacity(0.85), radius: scale * 0.35))
+            context.fill(illuminated, with: .color(.white))
         }
+        .padding(-Self.glowMargin)
     }
 }

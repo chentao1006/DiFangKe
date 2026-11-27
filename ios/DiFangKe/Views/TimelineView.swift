@@ -7720,8 +7720,12 @@ private struct CurrentStayTimelineCard: View {
             }
             .padding(.top, 20)
             .padding(.bottom, 20)
-            
-            Spacer(minLength: 0)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        // Reserve the button width and a small gap without adding timeline-column spacing.
+        .padding(.trailing, 48)
+        .frame(minHeight: 92, alignment: .top)
+        .overlay(alignment: .trailing) {
             Button(action: openDashboard) {
                 Image(systemName: "gauge.open.with.lines.needle.33percent")
                     .resizable()
@@ -7732,9 +7736,7 @@ private struct CurrentStayTimelineCard: View {
             }
             .dfkCircleGlassButtonStyle()
             .accessibilityLabel("打开仪表盘")
-            .padding(.top, 10)
         }
-        .frame(minHeight: 92, alignment: .top)
     }
 
     private var statusTimestamp: Date? {

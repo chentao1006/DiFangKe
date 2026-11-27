@@ -79,3 +79,83 @@ private struct DFKSheetDismissGuard: UIViewControllerRepresentable {
         }
     }
 }
+
+/// Left screen-edge swipe that calls `onDismiss`; place it in a background of the dismissible screen.
+struct DFKEdgeDismissGesture: UIViewRepresentable {
+    let onDismiss: () -> Void
+
+    func makeUIView(context: Context) -> DFKEdgeGestureHostView {
+        let view = DFKEdgeGestureHostView()
+        view.backgroundColor = .clear
+        view.windowDidChange = { [weak coordinator = context.coordinator] window in
+            coordinator?.install(in: window)
+        }
+        return view
+    }
+
+    func updateUIView(_ uiView: DFKEdgeGestureHostView, context: Context) {
+        context.coordinator.onDismiss = onDismiss
+        context.coordinator.install(in: uiView.window)
+    }
+
+    static func dismantleUIView(_ uiView: DFKEdgeGestureHostView, coordinator: Coordinator) {
+        coordinator.uninstall()
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(onDismiss: onDismiss)
+    }
+
+    final class Coordinator: NSObject, UIGestureRecognizerDelegate {
+        var onDismiss: () -> Void
+        private weak var installedWindow: UIWindow?
+        private var recognizer: UIScreenEdgePanGestureRecognizer?
+
+        init(onDismiss: @escaping () -> Void) {
+            self.onDismiss = onDismiss
+        }
+
+        func install(in window: UIWindow?) {
+            guard let window, installedWindow !== window else { return }
+            uninstall()
+            let recognizer = UIScreenEdgePanGestureRecognizer(target: self, action: #selector(handleEdgePan(_:)))
+            recognizer.edges = .left
+            recognizer.cancelsTouchesInView = false
+            recognizer.delegate = self
+            window.addGestureRecognizer(recognizer)
+            installedWindow = window
+            self.recognizer = recognizer
+        }
+
+        func uninstall() {
+            if let recognizer { installedWindow?.removeGestureRecognizer(recognizer) }
+            recognizer = nil
+            installedWindow = nil
+        }
+
+        @objc private func handleEdgePan(_ recognizer: UIScreenEdgePanGestureRecognizer) {
+            guard recognizer.state == .ended, let view = recognizer.view else { return }
+            let translation = recognizer.translation(in: view)
+            let velocity = recognizer.velocity(in: view)
+            if translation.x > 80 || velocity.x > 650 {
+                onDismiss()
+            }
+        }
+
+        func gestureRecognizer(
+            _ gestureRecognizer: UIGestureRecognizer,
+            shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer
+        ) -> Bool {
+            true
+        }
+    }
+}
+
+final class DFKEdgeGestureHostView: UIView {
+    var windowDidChange: ((UIWindow?) -> Void)?
+
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        windowDidChange?(window)
+    }
+}

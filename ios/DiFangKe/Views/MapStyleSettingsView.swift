@@ -389,11 +389,10 @@ struct BrowseMapRoutes: MapContent {
 
 extension View {
     func browseMapStyle(elevation: MapStyle.Elevation = .automatic,
-                        pointsOfInterest: PointOfInterestCategories = .all,
-                        colorSchemeOverride: ColorScheme? = nil) -> some View {
+                        pointsOfInterest: PointOfInterestCategories = .all) -> some View {
         let prefs = BrowseMapSettings.shared.value
         return mapStyle(prefs.mapStyle(elevation: elevation, pointsOfInterest: pointsOfInterest))
-            .transformEnvironment(\.colorScheme) { if let scheme = colorSchemeOverride ?? prefs.scheme { $0 = scheme } }
+            .transformEnvironment(\.colorScheme) { if let scheme = prefs.scheme { $0 = scheme } }
     }
 }
 

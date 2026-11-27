@@ -2,14 +2,18 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<key>DASHBOARD_LOW_BATTERY_FRACTION</key>
-	<real>0.20</real>
+	<key>DASHBOARD_MAP_ANCHOR_Y_FRACTION</key>
+	<real>0.618034</real>
 	<key>DASHBOARD_CAMERA_PITCH_DEGREES</key>
 	<real>55</real>
 	<key>DASHBOARD_CAMERA_DISTANCE_METERS</key>
 	<real>550</real>
 	<key>DASHBOARD_RESUME_SECONDS</key>
 	<real>10</real>
+	<key>DASHBOARD_SPEED_REFRESH_SECONDS</key>
+	<real>0.5</real>
+	<key>DASHBOARD_MAX_MOTION_ACCELERATION_MPS2</key>
+	<real>8</real>
 	<key>DASHBOARD_MOTION_INTERVAL_SECONDS</key>
 	<real>0.04</real>
 	<key>DASHBOARD_MOTION_DECAY_SECONDS</key>

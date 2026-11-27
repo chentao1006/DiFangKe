@@ -1503,10 +1503,44 @@ struct DFKMapPlaybackMarker: View {
     }
 }
 
+@MainActor
 @Observable
 final class PastMemoryBannerPresentation {
+    static let shared = PastMemoryBannerPresentation()
+    nonisolated private static let seenDayKey = "pastMemoryBannerSeenDay"
+
     var shownOn: Date?
-    var collapsedOn: Date?
+    /// The day the memory was seen (banner opened, closed, or notification
+    /// tapped). Persisted so the banner never shows itself again that day.
+    private(set) var collapsedOn: Date?
+    /// A manual expansion from the map button; never persisted.
+    private var expandedOn: Date?
+
+    private init() {
+        collapsedOn = UserDefaults.standard.object(forKey: Self.seenDayKey) as? Date
+    }
+
+    func isCollapsed(on day: Date) -> Bool {
+        collapsedOn == day && expandedOn != day
+    }
+
+    func collapse(on day: Date) {
+        expandedOn = nil
+        collapsedOn = day
+        UserDefaults.standard.set(day, forKey: Self.seenDayKey)
+    }
+
+    func expand(on day: Date) {
+        shownOn = day
+        expandedOn = day
+    }
+
+    /// Records that the memory delivered on `date` was seen outside the banner.
+    nonisolated static func markSeen(deliveredAt date: Date) {
+        let day = Calendar.current.startOfDay(for: date)
+        UserDefaults.standard.set(day, forKey: seenDayKey)
+        Task { @MainActor in shared.collapse(on: day) }
+    }
 }
 
 extension EnvironmentValues {
@@ -2382,9 +2416,10 @@ struct DFKMapView: View {
                                 .safeAreaPadding(.top, currentTopSafeAreaInset)
                                 .overlay(alignment: .topLeading) {
                                     if showsMapControls, let presentation = pastMemoryPresentation,
-                                       let day = presentation.collapsedOn, Calendar.current.isDateInToday(day) {
+                                       let day = presentation.collapsedOn, Calendar.current.isDateInToday(day),
+                                       presentation.isCollapsed(on: day) {
                                         Button {
-                                            withAnimation(.easeOut) { presentation.collapsedOn = nil }
+                                            withAnimation(.easeOut) { presentation.expand(on: day) }
                                         } label: {
                                             Image(systemName: "clock.arrow.trianglehead.counterclockwise.rotate.90")
                                                 .frame(width: 44, height: 44)

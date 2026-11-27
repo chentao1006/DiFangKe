@@ -77,7 +77,7 @@ struct MainTabView: View {
     @State private var pastMemory: PastFootprintMemory?
     @State private var pastMemoryPhotos: [String] = []
     @GestureState(resetTransaction: Transaction(animation: .easeOut)) private var bannerDragOffset: CGFloat = 0
-    @State private var bannerPresentation = PastMemoryBannerPresentation()
+    @State private var bannerPresentation = PastMemoryBannerPresentation.shared
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var memoryRefresh = 0
     @State private var selectedTab: Tab = .records
@@ -215,11 +215,12 @@ struct MainTabView: View {
     private func recordsWithBanner(map: AnyView, records: AnyView, usesColumns: Bool, landscapeTopInset: CGFloat?) -> some View {
         let today = Calendar.current.startOfDay(for: Date())
         let viewingToday = Calendar.current.isDate(selectedDate, inSameDayAs: today)
+        // Once seen today (banner or notification), it only returns via the map button.
         let canShowBanner = viewingToday && bannerPresentation.collapsedOn != today
         let eligible = selectedTab == .records && scenePhase == .active && canShowBanner && pastMemory != nil
-        let collapsed = bannerPresentation.collapsedOn == today
+        let collapsed = bannerPresentation.isCollapsed(on: today)
         func collapse() {
-            withAnimation(.easeOut) { bannerPresentation.collapsedOn = today }
+            withAnimation(.easeOut) { bannerPresentation.collapse(on: today) }
         }
         let mapWithBanner = map.environment(\.pastMemoryPresentation, pastMemory == nil ? nil : bannerPresentation).overlay(alignment: .top) {
             if !collapsed, bannerPresentation.shownOn == today, let pastMemory {

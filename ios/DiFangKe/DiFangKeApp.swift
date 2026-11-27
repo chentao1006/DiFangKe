@@ -248,6 +248,9 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
                let timestamp = userInfo["date"] as? Double {
                 
                 let date = Date(timeIntervalSince1970: timestamp)
+                if type == "highlight_footprint" {
+                    PastMemoryBannerPresentation.markSeen(deliveredAt: response.notification.date)
+                }
                 let idString = userInfo["footprintID"] as? String
                 let footprintID = idString != nil ? UUID(uuidString: idString!) : nil
                 

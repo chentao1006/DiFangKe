@@ -4944,7 +4944,7 @@ private struct PlannedTripDetailView: View {
         }
         .onGeometryChange(for: DisplayFoldDivision?.self) { DisplayFoldDivision($0) } action: { mapDivision = $0 }
         .background {
-            TripDetailEdgeDismissGesture(onDismiss: onClose)
+            DFKEdgeDismissGesture(onDismiss: onClose)
         }
         .sheet(isPresented: planSheetPresentation) {
             plannedTripSheet
@@ -9063,7 +9063,7 @@ struct TripDetailView: View {
         }
         .onGeometryChange(for: DisplayFoldDivision?.self) { DisplayFoldDivision($0) } action: { mapDivision = $0 }
         .background {
-            TripDetailEdgeDismissGesture(onDismiss: onClose)
+            DFKEdgeDismissGesture(onDismiss: onClose)
         }
         .onAppear {
             fitCamera(to: mapCoordinates)
@@ -9894,85 +9894,6 @@ struct TripDetailView: View {
                 cameraPosition = .rect(rect)
             }
         }
-    }
-}
-
-private struct TripDetailEdgeDismissGesture: UIViewRepresentable {
-    let onDismiss: () -> Void
-
-    func makeUIView(context: Context) -> EdgeGestureHostView {
-        let view = EdgeGestureHostView()
-        view.backgroundColor = .clear
-        view.windowDidChange = { [weak coordinator = context.coordinator] window in
-            coordinator?.install(in: window)
-        }
-        return view
-    }
-
-    func updateUIView(_ uiView: EdgeGestureHostView, context: Context) {
-        context.coordinator.onDismiss = onDismiss
-        context.coordinator.install(in: uiView.window)
-    }
-
-    static func dismantleUIView(_ uiView: EdgeGestureHostView, coordinator: Coordinator) {
-        coordinator.uninstall()
-    }
-
-    func makeCoordinator() -> Coordinator {
-        Coordinator(onDismiss: onDismiss)
-    }
-
-    final class Coordinator: NSObject, UIGestureRecognizerDelegate {
-        var onDismiss: () -> Void
-        private weak var installedWindow: UIWindow?
-        private var recognizer: UIScreenEdgePanGestureRecognizer?
-
-        init(onDismiss: @escaping () -> Void) {
-            self.onDismiss = onDismiss
-        }
-
-        func install(in window: UIWindow?) {
-            guard let window, installedWindow !== window else { return }
-            uninstall()
-            let recognizer = UIScreenEdgePanGestureRecognizer(target: self, action: #selector(handleEdgePan(_:)))
-            recognizer.edges = .left
-            recognizer.cancelsTouchesInView = false
-            recognizer.delegate = self
-            window.addGestureRecognizer(recognizer)
-            installedWindow = window
-            self.recognizer = recognizer
-        }
-
-        func uninstall() {
-            if let recognizer { installedWindow?.removeGestureRecognizer(recognizer) }
-            recognizer = nil
-            installedWindow = nil
-        }
-
-        @objc private func handleEdgePan(_ recognizer: UIScreenEdgePanGestureRecognizer) {
-            guard recognizer.state == .ended, let view = recognizer.view else { return }
-            let translation = recognizer.translation(in: view)
-            let velocity = recognizer.velocity(in: view)
-            if translation.x > 80 || velocity.x > 650 {
-                onDismiss()
-            }
-        }
-
-        func gestureRecognizer(
-            _ gestureRecognizer: UIGestureRecognizer,
-            shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer
-        ) -> Bool {
-            true
-        }
-    }
-}
-
-private final class EdgeGestureHostView: UIView {
-    var windowDidChange: ((UIWindow?) -> Void)?
-
-    override func didMoveToWindow() {
-        super.didMoveToWindow()
-        windowDidChange?(window)
     }
 }
 
