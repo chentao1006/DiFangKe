@@ -28,6 +28,7 @@ private struct DashboardMeter {
     var filteredAltitude: Double?
     var hasCourse = false
     var coordinates: [CLLocationCoordinate2D] = []
+    private var previousSpeedSample: (speed: Double, time: Date)?
     var groundSpeed = 0.0
     var courseRadians = 0.0
     var motionVelocity = SIMD3<Double>.zero
@@ -62,12 +63,15 @@ private struct DashboardMeter {
             guard location.timestamp.timeIntervalSince(start) >= -AppConfig.shared.currentLocationFreshnessThreshold,
                   location.timestamp > (previous?.timestamp ?? .distantPast),
                   location.horizontalAccuracy <= AppConfig.shared.maxGPSAccuracyFilter else { return }
-            var speed = location.speed >= 0 ? location.speed : nil
+            var speed = location.speed.isFinite && location.speed >= 0 ? location.speed : nil
             if let previous {
                 let meters = location.distance(from: previous)
                 let duration = location.timestamp.timeIntervalSince(previous.timestamp)
-                if speed == nil { speed = meters / duration }
-                if speed != 0 { reading.kilometers += meters / 1000 }
+                if speed == nil {
+                    let uncertainty = previous.horizontalAccuracy + location.horizontalAccuracy
+                    speed = max(0, meters - uncertainty) / duration
+                }
+                if location.speed != 0 { reading.kilometers += meters / 1000 }
                 reading.average = reading.kilometers * 3600 / location.timestamp.timeIntervalSince(start)
             }
             if location.timestamp >= start {
@@ -79,11 +83,10 @@ private struct DashboardMeter {
                 reading.routes = BrowseRouteBatch(lines: [.init(polyline: line, dashed: false)])
             }
             updateAltitude(location)
-            lastFixTime = location.timestamp
             hasCourse = location.course >= 0 && speed != 0
             if hasCourse { reading.heading = location.course.rounded() }
             if let speed {
-                groundSpeed = speed
+                acceptGroundSpeed(speed, at: location.timestamp)
                 if hasCourse { courseRadians = location.course * .pi / 180 }
                 updateSpeed(trueNorth: alignedToNorth)
             }
@@ -104,6 +107,28 @@ private struct DashboardMeter {
             }
             updateSpeed(trueNorth: trueNorth)
         }
+    }
+
+    private mutating func acceptGroundSpeed(_ candidate: Double, at time: Date) {
+        guard candidate.isFinite, candidate >= 0,
+              candidate <= AppConfig.shared.physicalMaxSpeedThreshold,
+              time > (previousSpeedSample?.time ?? .distantPast) else { return }
+        let freshness = AppConfig.shared.currentLocationFreshnessThreshold
+        let prior = previousSpeedSample
+        previousSpeedSample = (candidate, time)
+        if lastFixTime.map({ time.timeIntervalSince($0) >= freshness }) ?? true {
+            groundSpeed = 0
+        }
+        if candidate <= groundSpeed {
+            groundSpeed = candidate
+            if candidate == 0 { motionVelocity = .zero }
+        } else if let prior, time.timeIntervalSince(prior.time) < freshness {
+            // Only distinct location fixes can corroborate a rise. Motion ticks reuse the same fix.
+            let corroborated = min(prior.speed, candidate)
+            let elapsed = time.timeIntervalSince(prior.time)
+            groundSpeed = max(groundSpeed, min(corroborated, groundSpeed + maximumAcceleration * elapsed))
+        }
+        lastFixTime = time
     }
 
     private mutating func updateAltitude(_ location: CLLocation) {
@@ -138,11 +163,13 @@ private struct DashboardMeter {
     mutating func updateSpeed(trueNorth: Bool) {
         let baseline = freshGroundSpeed
         let speed: Double
-        if trueNorth && hasCourse {
-            let ground = SIMD3(baseline * cos(courseRadians), baseline * sin(courseRadians), 0)
-            speed = simd_length(ground + motionVelocity)
+        if baseline > 0, trueNorth, hasCourse {
+            let forward = SIMD3(cos(courseRadians), sin(courseRadians), 0)
+            speed = max(0, baseline + simd_dot(motionVelocity, forward))
+        } else if baseline > 0 {
+            speed = baseline
         } else {
-            speed = hypot(baseline, simd_length(motionVelocity))
+            speed = simd_length(motionVelocity)
         }
         if speed.isFinite { speedSamples.append(speed * 3.6) }
     }
