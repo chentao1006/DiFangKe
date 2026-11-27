@@ -1140,6 +1140,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
     
     var isTracking: Bool = false
     var lastUpdateTime: Date?
+    let acceptedLocationUpdates = CurrentValueSubject<(raw: CLLocation, mapped: CLLocation)?, Never>(nil)
     var lastLocation: CLLocation? {
         didSet { refreshMatchedPlace() }
     }
@@ -2860,6 +2861,7 @@ class LocationManager: NSObject, @preconcurrency CLLocationManagerDelegate {
 
         if lastLocation == nil || location.timestamp >= lastLocation!.timestamp {
             lastLocation = location
+            acceptedLocationUpdates.send((rawLocation, location))
             accuracy = location.horizontalAccuracy
         }
         // A stale background batch is useful for filling RawLocations, but it

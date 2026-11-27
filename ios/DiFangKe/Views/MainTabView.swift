@@ -81,6 +81,8 @@ struct MainTabView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var memoryRefresh = 0
     @State private var selectedTab: Tab = .records
+    @Environment(LocationManager.self) private var locationManager
+    @State private var showingDashboard = false
     @State private var isPresented = true
     @State private var presentationDetent: PresentationDetent = .medium
     /// A sheet stacked on the records sheet (calendar, footprint detail) is
@@ -125,6 +127,7 @@ struct MainTabView: View {
                 selectedTransport: $selectedTransport,
                 destination: $destination,
                 returnToNowRequest: returnToNowRequest,
+                openDashboard: { showingDashboard = true },
                 onRequestRecords: { selectedTab = .records },
                 onPlaybackStateChanged: { isRecordPlaybackActive = $0 }
             ) { map, records in
@@ -147,6 +150,9 @@ struct MainTabView: View {
                     isPresented = true
                 }
             }
+        }
+        .fullScreenCover(isPresented: $showingDashboard) {
+            FootprintDashboard(locationManager: locationManager)
         }
         .onOpenURL(perform: handleTripDeepLink)
     }
@@ -300,7 +306,7 @@ struct MainTabView: View {
                 }
 
                 RecordSheetContainer(
-                    isActive: selectedTab == .records,
+                    isActive: selectedTab == .records && !showingDashboard,
                     detent: presentationDetent,
                     onFullHeightStackedSheetChange: { hasFullHeightStackedSheet = $0 }
                 ) {

@@ -389,10 +389,11 @@ struct BrowseMapRoutes: MapContent {
 
 extension View {
     func browseMapStyle(elevation: MapStyle.Elevation = .automatic,
-                        pointsOfInterest: PointOfInterestCategories = .all) -> some View {
+                        pointsOfInterest: PointOfInterestCategories = .all,
+                        colorSchemeOverride: ColorScheme? = nil) -> some View {
         let prefs = BrowseMapSettings.shared.value
         return mapStyle(prefs.mapStyle(elevation: elevation, pointsOfInterest: pointsOfInterest))
-            .transformEnvironment(\.colorScheme) { if let scheme = prefs.scheme { $0 = scheme } }
+            .transformEnvironment(\.colorScheme) { if let scheme = colorSchemeOverride ?? prefs.scheme { $0 = scheme } }
     }
 }
 
@@ -405,6 +406,44 @@ extension MapPolyline {
             let paint = prefs.routeStroke(style, ink: ink, baseAlpha: opacity, layer: layer, playbackOpacity: playbackOpacity)
             self.stroke(Color(uiColor: paint.color), style: paint.style)
         }
+    }
+}
+
+struct MapPanelResizeHandle: View {
+    let horizontal: Bool
+    let extent: CGFloat
+    let bounds: ClosedRange<CGFloat>
+    var onBegin: () -> Void = {}
+    let onChange: (CGFloat) -> Void
+    let onEnd: (CGFloat) -> Void
+    @State private var startExtent: CGFloat?
+
+    private func adjustedExtent(_ translation: CGSize) -> CGFloat {
+        let delta = horizontal ? translation.width : translation.height
+        return min(bounds.upperBound, max(bounds.lowerBound, (startExtent ?? extent) + delta))
+    }
+
+    var body: some View {
+        Capsule()
+            .fill(.secondary.opacity(0.35))
+            .frame(width: horizontal ? 5 : 44, height: horizontal ? 44 : 5)
+            .frame(maxWidth: horizontal ? nil : .infinity, maxHeight: horizontal ? .infinity : nil)
+            .frame(width: horizontal ? 26 : nil, height: horizontal ? nil : 26)
+            .contentShape(Rectangle())
+            .gesture(DragGesture(minimumDistance: 4, coordinateSpace: .global)
+                .onChanged { value in
+                    if startExtent == nil {
+                        startExtent = extent
+                        onBegin()
+                    }
+                    onChange(adjustedExtent(value.translation))
+                }
+                .onEnded { value in
+                    let final = adjustedExtent(value.translation)
+                    onChange(final)
+                    onEnd(final)
+                    startExtent = nil
+                })
     }
 }
 

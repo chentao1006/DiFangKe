@@ -41,6 +41,7 @@
 		A7D3E1C20000000000000003 /* ShareCardTemplates.swift in Sources */ = {isa = PBXBuildFile; fileRef = A7D3E1C20000000000000004 /* ShareCardTemplates.swift */; };
 		AA4B2C8D1F0E3A7B9C5D6E8F /* PhotoService.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB4B2C8D1F0E3A7B9C5D6E8F /* PhotoService.swift */; };
 		AC19D6437C18A309FE001E29 /* Views/TimelineView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A54AB938AAFF2E0EF442F6AA /* Views/TimelineView.swift */; };
+		DED000010000000000000001 /* Views/FootprintDashboard.swift in Sources */ = {isa = PBXBuildFile; fileRef = DED000010000000000000002 /* Views/FootprintDashboard.swift */; };
 		B3928286E13850C29DAA2500 /* NotificationManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 66D82DFAC5BB6C7261047EF5 /* NotificationManager.swift */; };
 		B941AA120000000000000001 /* Views/MainTabView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B941AA120000000000000002 /* Views/MainTabView.swift */; };
 		B941AA130000000000000001 /* TripView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B941AA130000000000000002 /* TripView.swift */; };
@@ -209,6 +210,7 @@
 		A1D3F510AA001001AA001010 /* WatchMapView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = WatchMapView.swift; sourceTree = "<group>"; };
 		A49FF8D1053B68159E4D2EEC /* Footprint.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Footprint.swift; sourceTree = "<group>"; };
 		A54AB938AAFF2E0EF442F6AA /* Views/TimelineView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/TimelineView.swift; sourceTree = "<group>"; };
+		DED000010000000000000002 /* Views/FootprintDashboard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/FootprintDashboard.swift; sourceTree = "<group>"; };
 		A71100000000000000000002 /* DiFangKeWatchWidget.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = DiFangKeWatchWidget.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		A7D3E1C20000000000000002 /* TripShareTemplates.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TripShareTemplates.swift; sourceTree = "<group>"; };
 		A7D3E1C20000000000000004 /* ShareCardTemplates.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShareCardTemplates.swift; sourceTree = "<group>"; };
@@ -370,6 +372,7 @@
 				8406ACF5012D1DB8F428AB9C /* Config.plist */,
 				C1A2B3C4D5E6F70123456788 /* trip_major_cities.json */,
 				A54AB938AAFF2E0EF442F6AA /* Views/TimelineView.swift */,
+				DED000010000000000000002 /* Views/FootprintDashboard.swift */,
 				B941AA120000000000000002 /* Views/MainTabView.swift */,
 				2C84EEA3EDC02DA770FA555B /* DiFangKeApp.swift */,
 				45BAB919B70A00C9D4126C30 /* Info.plist */,
@@ -756,6 +759,7 @@
 				A7D3E1C20000000000000003 /* ShareCardTemplates.swift in Sources */,
 				C67848582FA3A082002DF823 /* WidgetDataSyncManager.swift in Sources */,
 				AC19D6437C18A309FE001E29 /* Views/TimelineView.swift in Sources */,
+				DED000010000000000000001 /* Views/FootprintDashboard.swift in Sources */,
 				B941AA120000000000000001 /* Views/MainTabView.swift in Sources */,
 				7C7F1D9D9F1F363DAAEAF0A0 /* DataManagerView.swift in Sources */,
 				8EDC80C32DCF8D059D548DB7 /* DiFangKeApp.swift in Sources */,

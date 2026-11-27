@@ -271,6 +271,7 @@ struct TimelineScene<Content: View>: View {
     @Binding var selectedTransport: Transport?
     @Binding var destination: TimelineDestination?
     let returnToNowRequest: Int
+    let openDashboard: () -> Void
     let onRequestRecords: () -> Void
     let onPlaybackStateChanged: (Bool) -> Void
     @ViewBuilder let content: (AnyView, AnyView) -> Content
@@ -1183,6 +1184,7 @@ struct TimelineScene<Content: View>: View {
             timelineDetent: $timelineDetent,
             isCalendarScrollLocked: $isCalendarScrollLocked,
             isSideBySide: isSideBySide,
+            openDashboard: openDashboard,
             selectedFootprint: $selectedFootprint,
             selectedFootprintStartsExpanded: $selectedFootprintStartsExpanded,
             selectedTransport: $selectedTransport,
@@ -3361,6 +3363,7 @@ private struct TimelineView: View {
     @Binding var timelineDetent: PresentationDetent
     @Binding var isCalendarScrollLocked: Bool
     let isSideBySide: Bool
+    let openDashboard: () -> Void
     @Binding var selectedFootprint: Footprint?
     @Binding var selectedFootprintStartsExpanded: Bool
     @Binding var selectedTransport: Transport?
@@ -5023,7 +5026,7 @@ private struct TimelineView: View {
                         }
                     }
                 case .currentStay:
-                    CurrentStayTimelineCard(locationManager: locationManager)
+                    CurrentStayTimelineCard(locationManager: locationManager, openDashboard: openDashboard)
                         .id(ScrollTarget.now)
                         
                     if !isImportantPlaceGuideDismissed && !allPlaces.contains(where: { $0.isUserDefined }) {
@@ -7601,6 +7604,7 @@ struct TimelinePhotoGrid: View {
 private struct CurrentStayTimelineCard: View {
     @Environment(\.modelContext) private var modelContext
     let locationManager: LocationManager
+    let openDashboard: () -> Void
     @State private var showingOngoingLocationSearch = false
     @State private var showingArrivalConfirmation = false
     /// Current movement speed, refreshed when the route or moving state
@@ -7718,6 +7722,17 @@ private struct CurrentStayTimelineCard: View {
             .padding(.bottom, 20)
             
             Spacer(minLength: 0)
+            Button(action: openDashboard) {
+                Image(systemName: "gauge.open.with.lines.needle.33percent")
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: 29, height: 29, alignment: .center)
+                    .offset(y: -1.5)
+                    .frame(width: 44, height: 44, alignment: .center)
+            }
+            .dfkCircleGlassButtonStyle()
+            .accessibilityLabel("打开仪表盘")
+            .padding(.top, 10)
         }
         .frame(minHeight: 92, alignment: .top)
     }

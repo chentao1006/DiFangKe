@@ -7892,38 +7892,21 @@ private struct TripPlanRouteSheet: View {
         minimumHeight: CGFloat,
         maximumHeight: CGFloat
     ) -> some View {
-        Capsule()
-            .fill(.secondary.opacity(0.35))
-            .frame(width: 44, height: 5)
-            .frame(maxWidth: .infinity)
-            .frame(height: 26)
-            .contentShape(Rectangle())
+        MapPanelResizeHandle(horizontal: false, extent: baseHeight,
+                             bounds: minimumHeight...maximumHeight,
+                             onBegin: {
+            routeMapDragStartHeight = baseHeight
+            if let displayedRouteMapCamera {
+                cameraPosition = .camera(displayedRouteMapCamera)
+            }
+        }, onChange: { routeMapHeight = $0 }, onEnd: { _ in
+            routeMapDragStartHeight = nil
+            Task { @MainActor in
+                await Task.yield()
+                fitCameraToCurrentSelection()
+            }
+        })
             .background(.regularMaterial)
-            .gesture(
-                DragGesture(minimumDistance: 4, coordinateSpace: .global)
-                    .onChanged { value in
-                        let startHeight = routeMapDragStartHeight ?? baseHeight
-                        if routeMapDragStartHeight == nil {
-                            routeMapDragStartHeight = startHeight
-                            if let displayedRouteMapCamera {
-                                cameraPosition = .camera(displayedRouteMapCamera)
-                            }
-                        }
-                        routeMapHeight = min(
-                            maximumHeight,
-                            max(minimumHeight, startHeight + value.translation.height)
-                        )
-                    }
-                    .onEnded { _ in
-                        routeMapDragStartHeight = nil
-                        Task { @MainActor in
-                            // 等最终高度完成布局后，仅按最终可见区域适配一次。
-                            // 拖动期间固定相机，避免同一矩形被逐帧重复适配。
-                            await Task.yield()
-                            fitCameraToCurrentSelection()
-                        }
-                    }
-            )
             .accessibilityLabel("调整地图高度")
             .accessibilityHint("上下拖动以调整地图和路线列表的高度")
     }

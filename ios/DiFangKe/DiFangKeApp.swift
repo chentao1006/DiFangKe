@@ -22,20 +22,8 @@ extension View {
         }
     }
 
-    /// Round floating icon button: native glass on iOS 26, bordered before.
-    @ViewBuilder
     func dfkCircleGlassButtonStyle() -> some View {
-        if #available(iOS 26.0, *) {
-            self.font(.body.weight(.semibold))
-                .controlSize(.large)
-                .buttonStyle(.glass)
-                .buttonBorderShape(.circle)
-        } else {
-            self.font(.body.weight(.semibold))
-                .controlSize(.large)
-                .buttonStyle(.bordered)
-                .buttonBorderShape(.circle)
-        }
+        buttonStyle(DFKCircleGlassButtonStyle())
     }
 
     @ViewBuilder
@@ -44,6 +32,22 @@ extension View {
             glassEffect(.regular, in: shape)
         } else {
             background(.regularMaterial, in: shape)
+        }
+    }
+}
+
+private struct DFKCircleGlassButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        let circle = configuration.label
+            .font(.body.weight(.semibold))
+            .frame(minWidth: 44, minHeight: 44)
+            .contentShape(Circle())
+
+        if #available(iOS 26.0, *) {
+            circle.glassEffect(.regular.interactive(), in: Circle())
+        } else {
+            circle.dfkDetailMaterial(in: Circle())
+                .opacity(configuration.isPressed ? 0.75 : 1)
         }
     }
 }
