@@ -6,6 +6,20 @@ struct ConfiguredTripCity: Decodable {
     let searchAliases: [String]?
 }
 
+struct RawDeletionPeriod: Decodable, Hashable {
+    let label: String
+    let day: Int?
+    let month: Int?
+
+    func cutoff(on date: Date) -> Date? {
+        let calendar = Calendar(identifier: .gregorian)
+        let today = calendar.startOfDay(for: date)
+        if let month, month > 0 { return calendar.date(byAdding: .month, value: -month, to: today) }
+        if let day, day > 0 { return calendar.date(byAdding: .day, value: -day, to: today) }
+        return nil
+    }
+}
+
 class AppConfig {
     static let shared = AppConfig()
     
@@ -69,6 +83,13 @@ class AppConfig {
         }
         return 0
     }
+
+    lazy var rawDeletionPeriods: [RawDeletionPeriod] = {
+        guard let periods = config["RAW_DELETION_PERIODS"],
+              let data = try? PropertyListSerialization.data(fromPropertyList: periods, format: .binary, options: 0)
+        else { return [] }
+        return (try? PropertyListDecoder().decode([RawDeletionPeriod].self, from: data)) ?? []
+    }()
 
     lazy var tripMajorCities: [ConfiguredTripCity] = {
         guard let url = Bundle.main.url(forResource: "trip_major_cities", withExtension: "json"),

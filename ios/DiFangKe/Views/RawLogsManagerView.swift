@@ -8,7 +8,7 @@ struct RawLogsManagerView: View {
     @State private var files: [RawFileItem] = []
     
     @State private var isBackingUp = false
-    @State private var backupStatus: String?
+    @State private var operationStatus: (operation: RawDataRangeOperation, message: String)?
     @State private var isExportingAll = false
     @State private var exportAllURL: URL?
     @State private var showingExportAllShareSheet = false
@@ -17,17 +17,13 @@ struct RawLogsManagerView: View {
     @State private var selectedFileURLs = Set<URL>()
     @State private var pendingDeletionURLs: [URL] = []
     @State private var showingDeleteConfirmation = false
-    @State private var pendingDeletionKind: LocalDeletionKind = .selection
     @State private var isDeleting = false
     @State private var deleteError: String?
-    @State private var localDeletionNotice: String?
     @State private var cloudSummary: RawLocationStore.CloudStorageSummary?
     @State private var isLoadingCloudSummary = false
     @State private var cloudManagementError: String?
     @State private var isDeletingCloudData = false
     @State private var rangeOperation: RawDataRangeOperation?
-    @State private var pendingCloudDeletionRange: ClosedRange<Date>?
-    @State private var showingCloudDeletionConfirmation = false
     
     @Environment(LocationManager.self) private var locationManager
     
@@ -64,11 +60,7 @@ struct RawLogsManagerView: View {
                     }
                 }
                 
-                if let status = backupStatus {
-                    Text(status)
-                        .font(.caption)
-                        .foregroundColor(.blue)
-                }
+                statusMessage(for: .backup)
             }
 
             Section(header: Text("iCloud 存储"), footer: Text(cloudStorageFooter)) {
@@ -99,13 +91,15 @@ struct RawLogsManagerView: View {
                     Label("按日期范围恢复到本地", systemImage: "icloud.and.arrow.down")
                 }
                 .disabled(isDeletingCloudData || isBackingUp)
+                statusMessage(for: .restore)
 
                 Button(role: .destructive) {
                     presentRangeOperation(.deleteCloud)
                 } label: {
-                    Label("按日期范围删除云端备份", systemImage: "icloud.slash")
+                    Label("批量删除云端备份", systemImage: "icloud.slash")
                 }
                 .disabled(isDeletingCloudData)
+                statusMessage(for: .deleteCloud)
             }
             
             Section(header: Text("本地轨迹文件"), footer: Text("这些文件记录了所有原始 GPS 坐标。足迹是从这些记录中提取的。")) {
@@ -129,7 +123,7 @@ struct RawLogsManagerView: View {
                     Button(role: .destructive) {
                         presentRangeOperation(.deleteLocal)
                     } label: {
-                        Label("按日期范围删除本地数据", systemImage: "calendar.badge.minus")
+                        Label("批量删除本地数据", systemImage: "calendar.badge.minus")
                     }
                     .disabled(isDeleting || isSelecting)
 
@@ -221,9 +215,21 @@ struct RawLogsManagerView: View {
             }
         }
         .sheet(item: $rangeOperation) { operation in
-            RawDataRangePicker(operation: operation) { startDate, endDate in
-                rangeOperation = nil
-                handleSelectedRange(operation, startDate: startDate, endDate: endDate)
+            RawDataRangePicker(operation: operation, files: files) { start, end in
+                Task { await performCloudRangeOperation(operation, from: start, through: end) }
+            } onDelete: { selection in
+                if operation == .deleteCloud { isDeletingCloudData = true } else { isDeleting = true }
+                defer {
+                    if operation == .deleteCloud { isDeletingCloudData = false } else { isDeleting = false }
+                }
+                switch try await selection.value.targets {
+                case .cloud(let ids):
+                    let count = try await RawLocationStore.shared.deleteCloudTrajectories(recordIDs: ids)
+                    operationStatus = (.deleteCloud, "已删除 \(count) 个云端备份文件，本地轨迹未受影响")
+                    await loadCloudSummary()
+                case .local(let urls):
+                    try await deleteFiles(urls)
+                }
             }
         }
         .alert("导出失败", isPresented: Binding(
@@ -255,28 +261,6 @@ struct RawLogsManagerView: View {
             Button("确定", role: .cancel) { deleteError = nil }
         } message: {
             Text(deleteError ?? "")
-        }
-        .alert("无需清理", isPresented: Binding(
-            get: { localDeletionNotice != nil },
-            set: { if !$0 { localDeletionNotice = nil } }
-        )) {
-            Button("确定", role: .cancel) { localDeletionNotice = nil }
-        } message: {
-            Text(localDeletionNotice ?? "")
-        }
-        .confirmationDialog(
-            "删除所选日期范围的云端备份？",
-            isPresented: $showingCloudDeletionConfirmation,
-            titleVisibility: .visible
-        ) {
-            Button("删除云端备份", role: .destructive) {
-                guard let range = pendingCloudDeletionRange else { return }
-                pendingCloudDeletionRange = nil
-                Task { await deleteCloudData(from: range.lowerBound, through: range.upperBound) }
-            }
-            Button("取消", role: .cancel) { pendingCloudDeletionRange = nil }
-        } message: {
-            Text("只会删除所选日期范围内的云端备份，不会删除或改写本地轨迹。")
         }
         .alert("iCloud 操作失败", isPresented: Binding(
             get: { cloudManagementError != nil },
@@ -314,42 +298,17 @@ struct RawLogsManagerView: View {
         }
     }
 
-    @MainActor
-    private func deleteCloudData(from startDate: Date, through endDate: Date) async {
-        isDeletingCloudData = true
-        defer { isDeletingCloudData = false }
-        do {
-            let deletedCount = try await RawLocationStore.shared.deleteCloudTrajectories(
-                from: startDate,
-                through: endDate
-            )
-            backupStatus = "已删除 \(deletedCount) 个云端备份文件，本地轨迹未受影响"
-            await loadCloudSummary()
-        } catch {
-            cloudManagementError = error.localizedDescription
+    @ViewBuilder
+    private func statusMessage(for operation: RawDataRangeOperation) -> some View {
+        if let status = operationStatus, status.operation == operation {
+            Text(status.message)
+                .font(.caption)
+                .foregroundColor(.blue)
         }
     }
 
     private func presentRangeOperation(_ operation: RawDataRangeOperation) {
         rangeOperation = operation
-    }
-
-    private func handleSelectedRange(
-        _ operation: RawDataRangeOperation,
-        startDate: Date,
-        endDate: Date
-    ) {
-        let normalizedStart = min(startDate, endDate)
-        let normalizedEnd = max(startDate, endDate)
-        switch operation {
-        case .backup, .restore:
-            Task { await performCloudRangeOperation(operation, from: normalizedStart, through: normalizedEnd) }
-        case .deleteCloud:
-            pendingCloudDeletionRange = normalizedStart...normalizedEnd
-            showingCloudDeletionConfirmation = true
-        case .deleteLocal:
-            requestLocalFilesDeletion(from: normalizedStart, through: normalizedEnd)
-        }
     }
 
     @MainActor
@@ -367,14 +326,14 @@ struct RawLogsManagerView: View {
                     from: startDate,
                     through: endDate
                 )
-                backupStatus = "备份完成：共备份 \(count) 个文件"
+                operationStatus = (.backup, "备份完成：共备份 \(count) 个文件")
                 await loadCloudSummary()
             case .restore:
                 let report = try await RawLocationStore.shared.restoreCloudTrajectories(
                     from: startDate,
                     through: endDate
                 )
-                backupStatus = "恢复完成：新增 \(report.restoredCount) 个，跳过本地已有 \(report.skippedExistingCount) 个"
+                operationStatus = (.restore, "恢复完成：新增 \(report.restoredCount) 个，跳过本地已有 \(report.skippedExistingCount) 个")
                 await loadFiles()
                 locationManager.refreshAvailableRawDates()
                 await locationManager.refreshForRecordingDeviceChange()
@@ -414,99 +373,42 @@ struct RawLogsManagerView: View {
 
     private func requestDeletion(of fileURLs: [URL]) {
         guard !fileURLs.isEmpty else { return }
-        pendingDeletionKind = .selection
         pendingDeletionURLs = fileURLs
         showingDeleteConfirmation = true
     }
 
-    private func requestLocalFilesDeletion(from startDate: Date, through endDate: Date) {
-        let fileURLs = files.map(\.url)
-        Task {
-            let matchingURLs = await Task.detached(priority: .utility) {
-                Self.fileURLs(fileURLs, from: startDate, through: endDate)
-            }.value
-            await MainActor.run {
-                guard !matchingURLs.isEmpty else {
-                    localDeletionNotice = "所选日期范围内没有本地轨迹数据。"
-                    return
-                }
-                pendingDeletionKind = .range(Self.rangeText(from: startDate, through: endDate))
-                pendingDeletionURLs = matchingURLs
-                showingDeleteConfirmation = true
-            }
-        }
-    }
-
-    nonisolated private static func fileURLs(
-        _ fileURLs: [URL],
-        from startDate: Date,
-        through endDate: Date
-    ) -> [URL] {
-        let formatter = DateFormatter()
-        formatter.calendar = Calendar(identifier: .gregorian)
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.dateFormat = "yyyy-MM-dd"
-        let startString = formatter.string(from: min(startDate, endDate))
-        let endString = formatter.string(from: max(startDate, endDate))
-        return fileURLs.filter {
-            let dateString = String($0.deletingPathExtension().lastPathComponent.prefix(10))
-            return dateString >= startString && dateString <= endString
-        }
-    }
-
-    nonisolated private static func rangeText(from startDate: Date, through endDate: Date) -> String {
-        let start = min(startDate, endDate).formatted(.dateTime.year().month().day())
-        let end = max(startDate, endDate).formatted(.dateTime.year().month().day())
-        return start == end ? start : "\(start) 至 \(end)"
-    }
-
     private var localDeletionConfirmationTitle: String {
-        switch pendingDeletionKind {
-        case .selection:
-            pendingDeletionURLs.count == 1
-                ? "删除这个轨迹文件？"
-                : "删除所选的 \(pendingDeletionURLs.count) 个轨迹文件？"
-        case .range(let rangeText):
-            "删除 \(rangeText) 的 \(pendingDeletionURLs.count) 个文件？"
-        }
+        pendingDeletionURLs.count == 1
+            ? "删除这个轨迹文件？"
+            : "删除所选的 \(pendingDeletionURLs.count) 个轨迹文件？"
     }
 
-    private var localDeletionConfirmationMessage: String {
-        let scope: String
-        switch pendingDeletionKind {
-        case .selection:
-            scope = "将永久删除此设备上的所选原始轨迹文件。"
-        case .range(let rangeText):
-            scope = "将永久删除此设备上 \(rangeText) 的原始轨迹文件。"
-        }
-        return scope + " 不会删除已提取的足迹或云端备份，也不会从 iCloud 自动恢复。"
-    }
+    private let localDeletionConfirmationMessage = "将永久删除此设备上的所选原始轨迹文件。不会删除已提取的足迹或云端备份，也不会从 iCloud 自动恢复。"
 
     private func deletePendingFiles() {
         let fileURLs = pendingDeletionURLs
         guard !fileURLs.isEmpty else { return }
         pendingDeletionURLs.removeAll()
-        isDeleting = true
-
         Task {
-            do {
-                try await RawLocationStore.shared.deleteLocalFiles(at: fileURLs)
-                await loadFiles()
-                await MainActor.run {
-                    selectedFileURLs.subtract(fileURLs)
-                    locationManager.refreshAvailableRawDates()
-                    if files.isEmpty {
-                        endSelection()
-                    }
-                    isDeleting = false
-                }
-            } catch {
-                await loadFiles()
-                await MainActor.run {
-                    deleteError = error.localizedDescription
-                    isDeleting = false
-                }
-            }
+            isDeleting = true
+            defer { isDeleting = false }
+            do { try await deleteFiles(fileURLs) }
+            catch { deleteError = error.localizedDescription }
+        }
+    }
+
+    @MainActor
+    private func deleteFiles(_ urls: [URL]) async throws {
+        guard !urls.isEmpty else { return }
+        do {
+            try await RawLocationStore.shared.deleteLocalFiles(at: urls)
+            await loadFiles()
+            selectedFileURLs.subtract(urls)
+            locationManager.refreshAvailableRawDates()
+            if files.isEmpty { endSelection() }
+        } catch {
+            await loadFiles()
+            throw error
         }
     }
 
@@ -627,11 +529,6 @@ struct RawLogsManagerView: View {
     
 }
 
-private enum LocalDeletionKind {
-    case selection
-    case range(String)
-}
-
 private enum RawDataRangeOperation: String, Identifiable {
     case backup
     case restore
@@ -644,10 +541,12 @@ private enum RawDataRangeOperation: String, Identifiable {
         switch self {
         case .backup: "选择备份范围"
         case .restore: "选择恢复范围"
-        case .deleteCloud: "选择云端删除范围"
-        case .deleteLocal: "选择本地删除范围"
+        case .deleteCloud: "批量删除云端备份"
+        case .deleteLocal: "批量删除本地轨迹"
         }
     }
+
+    var isDeletion: Bool { self == .deleteCloud || self == .deleteLocal }
 
     var actionTitle: String {
         switch self {
@@ -664,22 +563,80 @@ private enum RawDataRangeOperation: String, Identifiable {
         case .restore:
             "从 iCloud 下载范围内的备份；本地已有文件会跳过，不会覆盖。"
         case .deleteCloud:
-            "只删除范围内的云端备份，不影响本地文件。"
+            "只删除早于截止日期的云端备份，不影响本地文件。"
         case .deleteLocal:
-            "只删除范围内的本地原始轨迹，不影响云端备份或已生成足迹。"
+            "只删除早于截止日期的本地原始轨迹，不影响云端备份或已生成足迹。"
         }
+    }
+}
+
+private struct RawDeletionPreview {
+    enum Targets {
+        case cloud([CKRecord.ID])
+        case local([URL])
+
+        var count: Int {
+            switch self {
+            case .cloud(let ids): ids.count
+            case .local(let urls): urls.count
+            }
+        }
+    }
+
+    let period: RawDeletionPeriod
+    let cutoff: String
+    let targets: Targets
+    let bytes: Int64?
+
+    @concurrent
+    static func load(period: RawDeletionPeriod, cloud: Bool, files: [RawFileItem]) async throws -> Self {
+        guard let date = period.cutoff(on: Date()) else { throw CocoaError(.formatting) }
+        let cutoff = RawLocationStore.DeletionCutoff(date: date)
+        if cloud {
+            let ids = try await RawLocationStore.shared.cloudDeletionIDs(before: cutoff)
+            return Self(period: period, cutoff: cutoff.day, targets: .cloud(ids), bytes: nil)
+        }
+        let matches = files.filter { cutoff.includes(String($0.dateString.prefix(10))) }
+        return Self(period: period, cutoff: cutoff.day, targets: .local(matches.map(\.url)),
+                    bytes: matches.reduce(0) { $0 + $1.size })
+    }
+
+    var summary: String {
+        guard let bytes else { return "\(targets.count) 个文件" }
+        return "\(targets.count) 个文件，共 \(ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file))"
     }
 }
 
 private struct RawDataRangePicker: View {
     let operation: RawDataRangeOperation
+    let files: [RawFileItem]
+    let onDelete: (Task<RawDeletionPreview, Error>) async throws -> Void
     let onConfirm: (Date, Date) -> Void
 
     @Environment(\.dismiss) private var dismiss
     @State private var startDate: Date
     @State private var endDate: Date
 
-    init(operation: RawDataRangeOperation, onConfirm: @escaping (Date, Date) -> Void) {
+    @State private var period = AppConfig.shared.rawDeletionPeriods.last
+    @State private var preview: RawDeletionPreview?
+    @State private var previewError: String?
+    @State private var deleting = false
+    @State private var deletionFailure: String?
+    @State private var confirming = false
+    @State private var pendingSelection: (period: RawDeletionPeriod, task: Task<RawDeletionPreview, Error>)?
+
+    private func selectionTask(for period: RawDeletionPeriod) -> Task<RawDeletionPreview, Error> {
+        if let pendingSelection, pendingSelection.period == period { return pendingSelection.task }
+        pendingSelection?.task.cancel()
+        let task = Task { try await RawDeletionPreview.load(period: period, cloud: operation == .deleteCloud, files: files) }
+        pendingSelection = (period, task)
+        return task
+    }
+
+    init(operation: RawDataRangeOperation, files: [RawFileItem], onConfirm: @escaping (Date, Date) -> Void,
+         onDelete: @escaping (Task<RawDeletionPreview, Error>) async throws -> Void) {
+        self.files = files
+        self.onDelete = onDelete
         self.operation = operation
         self.onConfirm = onConfirm
         let today = Calendar.current.startOfDay(for: Date())
@@ -693,33 +650,119 @@ private struct RawDataRangePicker: View {
         NavigationStack {
             Form {
                 Section {
-                    DatePicker("开始日期", selection: $startDate, displayedComponents: .date)
-                    DatePicker("结束日期", selection: $endDate, in: startDate..., displayedComponents: .date)
+                    if operation.isDeletion {
+                        Picker("删除多久前的数据", selection: $period) {
+                            ForEach(AppConfig.shared.rawDeletionPeriods, id: \.self) { option in
+                                Text(option.label).tag(Optional(option))
+                            }
+                        }
+                        if let preview, preview.period == period {
+                            LabeledContent("早于此日期", value: preview.cutoff)
+                            LabeledContent("将删除", value: preview.summary)
+                        } else if let previewError {
+                            Text(previewError).foregroundStyle(.secondary)
+                        } else {
+                            ProgressView("正在统计文件…")
+                        }
+                    } else {
+                        DatePicker("开始日期", selection: $startDate, displayedComponents: .date)
+                        DatePicker("结束日期", selection: $endDate, in: startDate..., displayedComponents: .date)
+                    }
                 } footer: {
                     Text(operation.explanation)
                 }
 
                 Section {
-                    Button(role: operation == .deleteCloud || operation == .deleteLocal ? .destructive : nil) {
-                        onConfirm(startDate, endDate)
-                        dismiss()
+                    Button(role: operation.isDeletion ? .destructive : nil) {
+                        if operation.isDeletion {
+                            confirming = true
+                        } else {
+                            onConfirm(startDate, endDate)
+                            dismiss()
+                        }
                     } label: {
-                        Text(operation.actionTitle)
-                            .frame(maxWidth: .infinity)
+                        Group {
+                            if deleting {
+                                ProgressView("正在删除…")
+                            } else {
+                                Text(operation.actionTitle)
+                            }
+                        }
+                        .frame(maxWidth: .infinity)
                     }
                     .dfkPrimaryActionButtonStyle()
+                    .listRowInsets(EdgeInsets())
+                    .listRowBackground(Color.clear)
+                    .disabled(operation.isDeletion && (period == nil || (preview?.period == period && preview?.targets.count == 0)))
+                    .confirmationDialog(operation.title + "？", isPresented: $confirming, titleVisibility: .visible) {
+                        Button("永久删除", role: .destructive) {
+                            guard !deleting, let period else { return }
+                            deleting = true
+                            let selection = selectionTask(for: period)
+                            pendingSelection = nil
+                            Task {
+                                do {
+                                    try await onDelete(selection)
+                                    dismiss()
+                                } catch {
+                                    deleting = false
+                                    preview = nil
+                                    previewError = "请重新确认要删除的文件。"
+                                    deletionFailure = error.localizedDescription
+                                }
+                            }
+                        }
+                        Button("取消", role: .cancel) {}
+                    } message: {
+                        if let preview, preview.period == period {
+                            Text("将永久删除早于 \(preview.cutoff) 的 \(preview.summary)。")
+                        } else if let period {
+                            Text("将永久删除\(period.label)的\(operation == .deleteCloud ? "云端备份" : "本地轨迹文件")。")
+                        }
+                    }
                 }
             }
+            .disabled(deleting)
+            .task(id: period) {
+                guard operation.isDeletion else { return }
+                preview = nil
+                previewError = nil
+                guard let period else {
+                    previewError = "无法读取删除期限。"
+                    return
+                }
+                do {
+                    let result = try await selectionTask(for: period).value
+                    try Task.checkCancellation()
+                    preview = result
+                } catch {
+                    if !Task.isCancelled {
+                        pendingSelection = nil
+                        previewError = "无法完成统计：\(error.localizedDescription)"
+                    }
+                }
+            }
+            .onDisappear { pendingSelection?.task.cancel() }
             .navigationTitle(operation.title)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("取消") { dismiss() }
+                        .disabled(deleting)
                 }
             }
             .onChange(of: startDate) { _, newValue in
                 if endDate < newValue { endDate = newValue }
             }
+        }
+        .interactiveDismissDisabled(deleting)
+        .alert("删除失败", isPresented: Binding(
+            get: { deletionFailure != nil },
+            set: { if !$0 { deletionFailure = nil } }
+        )) {
+            Button("确定", role: .cancel) {}
+        } message: {
+            Text(deletionFailure ?? "")
         }
     }
 }

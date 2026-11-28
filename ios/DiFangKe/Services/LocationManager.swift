@@ -498,18 +498,34 @@ final class RawLocationStore {
         )
     }
 
-    func deleteCloudTrajectories(from startDate: Date, through endDate: Date) async throws -> Int {
-        let records = try await fetchCloudTrajectoryRecords(
-            predicate: NSPredicate(format: "date != %@", "")
-        )
-        let dateRange = Self.dateStringRange(from: startDate, through: endDate)
-        // CloudKit String fields cannot use range predicates. Fetch metadata
-        // only, then filter the ISO date strings away from the main actor.
-        let recordsToDelete = await Task.detached(priority: .utility) {
-            records.filter { dateRange.contains($0.dateString) }
-        }.value
+    struct DeletionCutoff {
+        private let formatter: DateFormatter
+        let day: String
 
-        let recordIDs = recordsToDelete.map(\.recordID)
+        init(date: Date) {
+            let formatter = DateFormatter()
+            formatter.locale = Locale(identifier: "en_US_POSIX")
+            formatter.calendar = Calendar(identifier: .gregorian)
+            formatter.dateFormat = "yyyy-MM-dd"
+            self.formatter = formatter
+            day = formatter.string(from: date)
+        }
+
+        func includes(_ candidate: String) -> Bool {
+            guard candidate.count == 10, candidate < day,
+                  let date = formatter.date(from: candidate) else { return false }
+            return formatter.string(from: date) == candidate
+        }
+    }
+
+    @concurrent
+    func cloudDeletionIDs(before cutoff: DeletionCutoff) async throws -> [CKRecord.ID] {
+        let records = try await fetchCloudTrajectoryRecords(predicate: NSPredicate(format: "date != %@", ""))
+        try Task.checkCancellation()
+        return records.filter { cutoff.includes($0.dateString) }.map(\.recordID)
+    }
+
+    func deleteCloudTrajectories(recordIDs: [CKRecord.ID]) async throws -> Int {
         let batchSize = 200
         var deletedCount = 0
         var index = 0
